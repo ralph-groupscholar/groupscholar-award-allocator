@@ -6,6 +6,7 @@ A Go-based CLI that ranks applicants and allocates scholarship awards against a 
 - Weighted prioritization using applicant score and need level
 - Budget-aware allocation with min/max award caps
 - Summary metrics by need level plus a ranked award list
+- Coverage and unfunded demand signals, including unfunded lists
 - Optional JSON export for dashboards or downstream analysis
 
 ## Usage
@@ -18,7 +19,8 @@ A Go-based CLI that ranks applicants and allocates scholarship awards against a 
   -max 5000 \
   -score-weight 0.7 \
   -need-weight 0.3 \
-  -top 5
+  -top 5 \
+  -unfunded 5
 ```
 
 To export JSON:
