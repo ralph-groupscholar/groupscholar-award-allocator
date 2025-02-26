@@ -7,3 +7,7 @@
 ## Iteration 2
 - Added coverage metrics, unfunded-by-need summaries, and unfunded applicant lists for stronger demand visibility.
 - Expanded CLI options and README examples to surface unfunded rankings alongside awards.
+
+## Iteration 3
+- Added an optional minimum score eligibility threshold to filter applicants below a configurable score.
+- Updated CLI usage documentation to cover the new eligibility guardrail.

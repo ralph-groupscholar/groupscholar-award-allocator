@@ -79,6 +79,7 @@ func main() {
 	reserveHigh := flag.Float64("reserve-high", 0, "Share of budget reserved for high-need applicants (0-1)")
 	roundTo := flag.Float64("round", 0, "Round awards to nearest increment (0 disables)")
 	maxPercent := flag.Float64("max-percent", 1, "Max percent of requested amount to award (0-1]")
+	minScore := flag.Float64("min-score", 0, "Minimum applicant score to be eligible")
 	jsonPath := flag.String("json", "", "Optional path to write JSON output")
 	topN := flag.Int("top", 10, "Number of awarded applicants to display")
 	showAll := flag.Bool("all", false, "Show all awarded applicants")
@@ -104,6 +105,9 @@ func main() {
 	if *maxPercent <= 0 || *maxPercent > 1 {
 		exitWith("max-percent must be between 0 (exclusive) and 1")
 	}
+	if *minScore < 0 {
+		exitWith("min-score must be >= 0")
+	}
 	weightTotal := *scoreWeight + *needWeight
 	if weightTotal == 0 {
 		exitWith("score-weight and need-weight cannot both be zero")
@@ -114,6 +118,7 @@ func main() {
 		exitWith(err.Error())
 	}
 
+	applyMinScore(applicants, *minScore)
 	normalizeScores(applicants)
 	assignPriority(applicants, *scoreWeight, *needWeight)
 	sortApplicants(applicants)
@@ -270,6 +275,17 @@ func markIneligible(applicant *applicant, message string) {
 		return
 	}
 	applicant.EligibilityMsg = fmt.Sprintf("%s; %s", applicant.EligibilityMsg, message)
+}
+
+func applyMinScore(applicants []*applicant, minScore float64) {
+	if minScore <= 0 {
+		return
+	}
+	for _, item := range applicants {
+		if item.ScoreRaw < minScore {
+			markIneligible(item, fmt.Sprintf("score below minimum (%.1f)", minScore))
+		}
+	}
 }
 
 func normalizeScores(applicants []*applicant) {
