@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	sq "github.com/Masterminds/squirrel"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type applicant struct {
@@ -85,6 +90,7 @@ func main() {
 	showAll := flag.Bool("all", false, "Show all awarded applicants")
 	unfundedTop := flag.Int("unfunded", 10, "Number of unfunded eligible applicants to display")
 	showAllUnfunded := flag.Bool("unfunded-all", false, "Show all unfunded eligible applicants")
+	dbLog := flag.Bool("db-log", false, "Log allocation run to Postgres when GS_AWARD_ALLOCATOR_DB_URL is set")
 	flag.Parse()
 
 	if *inputPath == "" || *budget <= 0 {
@@ -142,6 +148,33 @@ func main() {
 			exitWith(err.Error())
 		}
 		fmt.Printf("\nJSON written to %s\n", *jsonPath)
+	}
+
+	if *dbLog {
+		dbConfig, err := loadDBConfig()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "DB logging disabled: %v\n", err)
+		} else if !dbConfig.Enabled {
+			fmt.Fprintln(os.Stderr, "DB logging disabled: GS_AWARD_ALLOCATOR_DB_URL not set")
+		} else {
+			ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+			defer cancel()
+			opts := dbRunOptions{
+				MinAward:    *minAward,
+				MaxAward:    *maxAward,
+				ScoreWeight: *scoreWeight,
+				NeedWeight:  *needWeight,
+				ReserveHigh: *reserveHigh,
+				RoundTo:     *roundTo,
+				MaxPercent:  *maxPercent,
+				MinScore:    *minScore,
+			}
+			if err := logRunToDatabase(ctx, dbConfig, summary, applicants, *inputPath, opts); err != nil {
+				fmt.Fprintf(os.Stderr, "DB logging failed: %v\n", err)
+			} else {
+				fmt.Println("\nLogged allocation run to database.")
+			}
+		}
 	}
 }
 
@@ -685,6 +718,261 @@ func writeJSON(path string, summary allocationSummary, awarded []*applicant) err
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(summary); err != nil {
 		return fmt.Errorf("unable to write JSON output: %w", err)
+	}
+	return nil
+}
+
+type dbConfig struct {
+	Enabled bool
+	URL     string
+	Schema  string
+}
+
+type dbRunOptions struct {
+	MinAward    float64
+	MaxAward    float64
+	ScoreWeight float64
+	NeedWeight  float64
+	ReserveHigh float64
+	RoundTo     float64
+	MaxPercent  float64
+	MinScore    float64
+}
+
+func loadDBConfig() (dbConfig, error) {
+	url := strings.TrimSpace(os.Getenv("GS_AWARD_ALLOCATOR_DB_URL"))
+	if url == "" {
+		return dbConfig{Enabled: false}, nil
+	}
+	schema := strings.TrimSpace(os.Getenv("GS_AWARD_ALLOCATOR_SCHEMA"))
+	if schema == "" {
+		schema = "gs_award_allocator"
+	}
+	schema, err := sanitizeIdentifier(schema)
+	if err != nil {
+		return dbConfig{}, err
+	}
+	return dbConfig{
+		Enabled: true,
+		URL:     url,
+		Schema:  schema,
+	}, nil
+}
+
+func sanitizeIdentifier(value string) (string, error) {
+	if value == "" {
+		return "", errors.New("schema must not be empty")
+	}
+	value = strings.ToLower(value)
+	for i, r := range value {
+		if (r >= 'a' && r <= 'z') || r == '_' || (r >= '0' && r <= '9' && i > 0) {
+			continue
+		}
+		return "", fmt.Errorf("invalid schema name: %s", value)
+	}
+	return value, nil
+}
+
+func logRunToDatabase(ctx context.Context, cfg dbConfig, summary allocationSummary, applicants []*applicant, inputPath string, opts dbRunOptions) error {
+	pool, err := pgxpool.New(ctx, cfg.URL)
+	if err != nil {
+		return fmt.Errorf("open pool: %w", err)
+	}
+	defer pool.Close()
+
+	if err := ensureDBSchema(ctx, pool, cfg.Schema); err != nil {
+		return err
+	}
+
+	runID := uuid.New()
+	if err := insertRun(ctx, pool, cfg.Schema, runID, summary, inputPath, opts); err != nil {
+		return err
+	}
+	if err := insertApplicants(ctx, pool, cfg.Schema, runID, applicants); err != nil {
+		return err
+	}
+	return nil
+}
+
+func ensureDBSchema(ctx context.Context, pool *pgxpool.Pool, schema string) error {
+	_, err := pool.Exec(ctx, fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", schema))
+	if err != nil {
+		return fmt.Errorf("create schema: %w", err)
+	}
+
+	runTable := fmt.Sprintf(`
+CREATE TABLE IF NOT EXISTS %s.runs (
+  run_id uuid PRIMARY KEY,
+  generated_at timestamptz NOT NULL,
+  input_path text,
+  budget numeric NOT NULL,
+  budget_used numeric NOT NULL,
+  budget_left numeric NOT NULL,
+  applicants int NOT NULL,
+  awarded_count int NOT NULL,
+  ineligible_count int NOT NULL,
+  eligible_unfunded_count int NOT NULL,
+  eligible_unfunded_amount numeric NOT NULL,
+  eligible_requested_total numeric NOT NULL,
+  coverage_rate numeric NOT NULL,
+  average_award numeric NOT NULL,
+  min_awarded numeric NOT NULL,
+  max_awarded numeric NOT NULL,
+  min_award_option numeric NOT NULL,
+  max_award_option numeric NOT NULL,
+  score_weight numeric NOT NULL,
+  need_weight numeric NOT NULL,
+  reserve_high numeric NOT NULL,
+  round_to numeric NOT NULL,
+  max_percent numeric NOT NULL,
+  min_score numeric NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);`, schema)
+	if _, err := pool.Exec(ctx, runTable); err != nil {
+		return fmt.Errorf("create runs table: %w", err)
+	}
+
+	applicantTable := fmt.Sprintf(`
+CREATE TABLE IF NOT EXISTS %s.applicants (
+  id bigserial PRIMARY KEY,
+  run_id uuid NOT NULL REFERENCES %s.runs(run_id) ON DELETE CASCADE,
+  applicant_id text NOT NULL,
+  name text,
+  need_level text,
+  score_raw numeric,
+  score_norm numeric,
+  priority numeric,
+  requested numeric,
+  awarded numeric,
+  eligible boolean,
+  eligibility_msg text
+);`, schema, schema)
+	if _, err := pool.Exec(ctx, applicantTable); err != nil {
+		return fmt.Errorf("create applicants table: %w", err)
+	}
+
+	indexSQL := fmt.Sprintf("CREATE INDEX IF NOT EXISTS applicants_run_id_idx ON %s.applicants(run_id);", schema)
+	if _, err := pool.Exec(ctx, indexSQL); err != nil {
+		return fmt.Errorf("create index: %w", err)
+	}
+	return nil
+}
+
+func insertRun(ctx context.Context, pool *pgxpool.Pool, schema string, runID uuid.UUID, summary allocationSummary, inputPath string, opts dbRunOptions) error {
+	builder := sq.Insert(schema+".runs").
+		Columns(
+			"run_id",
+			"generated_at",
+			"input_path",
+			"budget",
+			"budget_used",
+			"budget_left",
+			"applicants",
+			"awarded_count",
+			"ineligible_count",
+			"eligible_unfunded_count",
+			"eligible_unfunded_amount",
+			"eligible_requested_total",
+			"coverage_rate",
+			"average_award",
+			"min_awarded",
+			"max_awarded",
+			"min_award_option",
+			"max_award_option",
+			"score_weight",
+			"need_weight",
+			"reserve_high",
+			"round_to",
+			"max_percent",
+			"min_score",
+		).
+		Values(
+			runID,
+			summary.GeneratedAt,
+			inputPath,
+			summary.Budget,
+			summary.BudgetUsed,
+			summary.BudgetLeft,
+			summary.Applicants,
+			summary.AwardedCount,
+			summary.IneligibleCount,
+			summary.EligibleUnfundedCount,
+			summary.EligibleUnfundedAmount,
+			summary.EligibleRequestedTotal,
+			summary.CoverageRate,
+			summary.AverageAward,
+			summary.MinAwarded,
+			summary.MaxAwarded,
+			opts.MinAward,
+			opts.MaxAward,
+			opts.ScoreWeight,
+			opts.NeedWeight,
+			opts.ReserveHigh,
+			opts.RoundTo,
+			opts.MaxPercent,
+			opts.MinScore,
+		).
+		PlaceholderFormat(sq.Dollar)
+
+	query, args, err := builder.ToSql()
+	if err != nil {
+		return fmt.Errorf("build run insert: %w", err)
+	}
+	if _, err := pool.Exec(ctx, query, args...); err != nil {
+		return fmt.Errorf("insert run: %w", err)
+	}
+	return nil
+}
+
+func insertApplicants(ctx context.Context, pool *pgxpool.Pool, schema string, runID uuid.UUID, applicants []*applicant) error {
+	if len(applicants) == 0 {
+		return nil
+	}
+	const batchSize = 200
+	for start := 0; start < len(applicants); start += batchSize {
+		end := start + batchSize
+		if end > len(applicants) {
+			end = len(applicants)
+		}
+		builder := sq.Insert(schema+".applicants").
+			Columns(
+				"run_id",
+				"applicant_id",
+				"name",
+				"need_level",
+				"score_raw",
+				"score_norm",
+				"priority",
+				"requested",
+				"awarded",
+				"eligible",
+				"eligibility_msg",
+			).
+			PlaceholderFormat(sq.Dollar)
+
+		for _, item := range applicants[start:end] {
+			builder = builder.Values(
+				runID,
+				item.ID,
+				item.Name,
+				item.NeedLevel,
+				item.ScoreRaw,
+				item.ScoreNorm,
+				item.PriorityScore,
+				item.Requested,
+				item.Awarded,
+				item.Eligible,
+				item.EligibilityMsg,
+			)
+		}
+
+		query, args, err := builder.ToSql()
+		if err != nil {
+			return fmt.Errorf("build applicant insert: %w", err)
+		}
+		if _, err := pool.Exec(ctx, query, args...); err != nil {
+			return fmt.Errorf("insert applicants: %w", err)
+		}
 	}
 	return nil
 }

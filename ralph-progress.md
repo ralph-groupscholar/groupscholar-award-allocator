@@ -11,3 +11,7 @@
 ## Iteration 3
 - Added an optional minimum score eligibility threshold to filter applicants below a configurable score.
 - Updated CLI usage documentation to cover the new eligibility guardrail.
+
+## Iteration 4
+- Added optional Postgres logging for allocation runs, with schema-safe setup and batch applicant inserts.
+- Documented database logging env vars and CLI flag usage in the README.

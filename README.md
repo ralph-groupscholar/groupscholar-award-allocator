@@ -34,6 +34,26 @@ To export JSON:
   -json allocation.json
 ```
 
+## Database Logging (Optional)
+
+Enable run logging to Postgres for longitudinal analysis.
+
+Set environment variables:
+
+```bash
+export GS_AWARD_ALLOCATOR_DB_URL="postgres://<user>:<password>@<host>:<port>/<db>?sslmode=require"
+export GS_AWARD_ALLOCATOR_SCHEMA="gs_award_allocator"
+```
+
+Then run with `-db-log`:
+
+```bash
+/opt/homebrew/bin/go run . \
+  -input sample-applicants.csv \
+  -budget 20000 \
+  -db-log
+```
+
 ## CSV Schema
 
 Required headers:
