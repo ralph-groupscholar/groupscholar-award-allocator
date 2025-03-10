@@ -38,12 +38,17 @@ type allocationSummary struct {
 	BudgetUsed              float64                    `json:"budget_used"`
 	BudgetLeft              float64                    `json:"budget_left"`
 	Applicants              int                        `json:"applicants"`
+	EligibleCount           int                        `json:"eligible_count"`
 	AwardedCount            int                        `json:"awarded_count"`
 	IneligibleCount         int                        `json:"ineligible_count"`
 	EligibleUnfundedCount   int                        `json:"eligible_unfunded_count"`
 	EligibleUnfundedAmount  float64                    `json:"eligible_unfunded_amount"`
 	EligibleRequestedTotal  float64                    `json:"eligible_requested_total"`
+	FullyFundedCount        int                        `json:"fully_funded_count"`
+	PartiallyFundedCount    int                        `json:"partially_funded_count"`
+	FundingGapTotal         float64                    `json:"funding_gap_total"`
 	CoverageRate            float64                    `json:"coverage_rate"`
+	FullFundingRate         float64                    `json:"full_funding_rate"`
 	AverageAward            float64                    `json:"average_award"`
 	MinAwarded              float64                    `json:"min_awarded"`
 	MaxAwarded              float64                    `json:"max_awarded"`
@@ -52,6 +57,7 @@ type allocationSummary struct {
 	IneligibleReasonSummary map[string]int             `json:"ineligible_reasons"`
 	Awards                  []awardRecord              `json:"awards"`
 	Unfunded                []awardRecord              `json:"unfunded"`
+	Ineligible              []ineligibleRecord         `json:"ineligible"`
 }
 
 type needAgg struct {
@@ -72,6 +78,15 @@ type awardRecord struct {
 	Requested   float64 `json:"requested"`
 	Awarded     float64 `json:"awarded"`
 	Priority    float64 `json:"priority"`
+}
+
+type ineligibleRecord struct {
+	ApplicantID string  `json:"applicant_id"`
+	Name        string  `json:"name"`
+	NeedLevel   string  `json:"need_level"`
+	Score       float64 `json:"score"`
+	Requested   float64 `json:"requested"`
+	Reason      string  `json:"reason"`
 }
 
 func main() {
@@ -487,9 +502,12 @@ func summarize(applicants []*applicant, budget float64, awarded []*applicant) al
 	var maxAward float64
 	ineligibleReasons := make(map[string]int)
 	var ineligibleCount int
+	var eligibleCount int
 	var unfundedCount int
 	var unfundedAmount float64
 	var eligibleRequestedTotal float64
+	var fullyFundedCount int
+	var partiallyFundedCount int
 	if len(awarded) > 0 {
 		minAward = awarded[0].Awarded
 		maxAward = awarded[0].Awarded
@@ -503,6 +521,7 @@ func summarize(applicants []*applicant, budget float64, awarded []*applicant) al
 			}
 			continue
 		}
+		eligibleCount++
 		eligibleRequestedTotal += item.Requested
 		if item.Awarded == 0 {
 			unfundedCount++
@@ -511,6 +530,12 @@ func summarize(applicants []*applicant, budget float64, awarded []*applicant) al
 			agg.Count++
 			agg.Requested += item.Requested
 			unfundedByNeed[item.NeedLevel] = agg
+			continue
+		}
+		if item.Awarded >= item.Requested {
+			fullyFundedCount++
+		} else {
+			partiallyFundedCount++
 		}
 	}
 
@@ -537,6 +562,14 @@ func summarize(applicants []*applicant, budget float64, awarded []*applicant) al
 	if eligibleRequestedTotal > 0 {
 		coverageRate = budgetUsed / eligibleRequestedTotal
 	}
+	fundingGapTotal := eligibleRequestedTotal - budgetUsed
+	if fundingGapTotal < 0 {
+		fundingGapTotal = 0
+	}
+	fullFundingRate := 0.0
+	if eligibleCount > 0 {
+		fullFundingRate = float64(fullyFundedCount) / float64(eligibleCount)
+	}
 
 	return allocationSummary{
 		GeneratedAt:             time.Now().Format(time.RFC3339),
@@ -544,12 +577,17 @@ func summarize(applicants []*applicant, budget float64, awarded []*applicant) al
 		BudgetUsed:              budgetUsed,
 		BudgetLeft:              budget - budgetUsed,
 		Applicants:              len(applicants),
+		EligibleCount:           eligibleCount,
 		AwardedCount:            len(awarded),
 		IneligibleCount:         ineligibleCount,
 		EligibleUnfundedCount:   unfundedCount,
 		EligibleUnfundedAmount:  unfundedAmount,
 		EligibleRequestedTotal:  eligibleRequestedTotal,
+		FullyFundedCount:        fullyFundedCount,
+		PartiallyFundedCount:    partiallyFundedCount,
+		FundingGapTotal:         fundingGapTotal,
 		CoverageRate:            coverageRate,
+		FullFundingRate:         fullFundingRate,
 		AverageAward:            averageAward,
 		MinAwarded:              minAward,
 		MaxAwarded:              maxAward,
@@ -600,11 +638,15 @@ func printSummary(summary allocationSummary) {
 	fmt.Println("Award Allocation Summary")
 	fmt.Println(strings.Repeat("-", 26))
 	fmt.Printf("Applicants:   %d\n", summary.Applicants)
+	fmt.Printf("Eligible:     %d\n", summary.EligibleCount)
 	fmt.Printf("Awarded:      %d\n", summary.AwardedCount)
 	fmt.Printf("Ineligible:   %d\n", summary.IneligibleCount)
 	fmt.Printf("Eligible Unfunded: %d ($%.2f requested)\n", summary.EligibleUnfundedCount, summary.EligibleUnfundedAmount)
 	fmt.Printf("Eligible Requested: $%.2f\n", summary.EligibleRequestedTotal)
 	fmt.Printf("Coverage Rate: %.1f%%\n", summary.CoverageRate*100)
+	fmt.Printf("Fully Funded: %d (%.1f%% of eligible)\n", summary.FullyFundedCount, summary.FullFundingRate*100)
+	fmt.Printf("Partially Funded: %d\n", summary.PartiallyFundedCount)
+	fmt.Printf("Funding Gap:  $%.2f\n", summary.FundingGapTotal)
 	fmt.Printf("Budget Used:  $%.2f\n", summary.BudgetUsed)
 	fmt.Printf("Budget Left:  $%.2f\n", summary.BudgetLeft)
 	fmt.Printf("Average Award $%.2f\n", summary.AverageAward)
@@ -892,12 +934,17 @@ CREATE TABLE IF NOT EXISTS %s.runs (
   budget_used numeric NOT NULL,
   budget_left numeric NOT NULL,
   applicants int NOT NULL,
+  eligible_count int NOT NULL,
   awarded_count int NOT NULL,
   ineligible_count int NOT NULL,
   eligible_unfunded_count int NOT NULL,
   eligible_unfunded_amount numeric NOT NULL,
   eligible_requested_total numeric NOT NULL,
+  fully_funded_count int NOT NULL,
+  partially_funded_count int NOT NULL,
+  funding_gap_total numeric NOT NULL,
   coverage_rate numeric NOT NULL,
+  full_funding_rate numeric NOT NULL,
   average_award numeric NOT NULL,
   min_awarded numeric NOT NULL,
   max_awarded numeric NOT NULL,
@@ -913,6 +960,9 @@ CREATE TABLE IF NOT EXISTS %s.runs (
 );`, schema)
 	if _, err := pool.Exec(ctx, runTable); err != nil {
 		return fmt.Errorf("create runs table: %w", err)
+	}
+	if err := ensureRunColumns(ctx, pool, schema); err != nil {
+		return err
 	}
 
 	applicantTable := fmt.Sprintf(`
@@ -941,6 +991,20 @@ CREATE TABLE IF NOT EXISTS %s.applicants (
 	return nil
 }
 
+func ensureRunColumns(ctx context.Context, pool *pgxpool.Pool, schema string) error {
+	alter := fmt.Sprintf(`
+ALTER TABLE %s.runs
+  ADD COLUMN IF NOT EXISTS eligible_count int NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS fully_funded_count int NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS partially_funded_count int NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS funding_gap_total numeric NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS full_funding_rate numeric NOT NULL DEFAULT 0;`, schema)
+	if _, err := pool.Exec(ctx, alter); err != nil {
+		return fmt.Errorf("alter runs table: %w", err)
+	}
+	return nil
+}
+
 func insertRun(ctx context.Context, pool *pgxpool.Pool, schema string, runID uuid.UUID, summary allocationSummary, inputPath string, opts dbRunOptions) error {
 	builder := sq.Insert(schema+".runs").
 		Columns(
@@ -951,12 +1015,17 @@ func insertRun(ctx context.Context, pool *pgxpool.Pool, schema string, runID uui
 			"budget_used",
 			"budget_left",
 			"applicants",
+			"eligible_count",
 			"awarded_count",
 			"ineligible_count",
 			"eligible_unfunded_count",
 			"eligible_unfunded_amount",
 			"eligible_requested_total",
+			"fully_funded_count",
+			"partially_funded_count",
+			"funding_gap_total",
 			"coverage_rate",
+			"full_funding_rate",
 			"average_award",
 			"min_awarded",
 			"max_awarded",
@@ -977,12 +1046,17 @@ func insertRun(ctx context.Context, pool *pgxpool.Pool, schema string, runID uui
 			summary.BudgetUsed,
 			summary.BudgetLeft,
 			summary.Applicants,
+			summary.EligibleCount,
 			summary.AwardedCount,
 			summary.IneligibleCount,
 			summary.EligibleUnfundedCount,
 			summary.EligibleUnfundedAmount,
 			summary.EligibleRequestedTotal,
+			summary.FullyFundedCount,
+			summary.PartiallyFundedCount,
+			summary.FundingGapTotal,
 			summary.CoverageRate,
+			summary.FullFundingRate,
 			summary.AverageAward,
 			summary.MinAwarded,
 			summary.MaxAwarded,

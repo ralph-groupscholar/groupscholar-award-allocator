@@ -17,5 +17,9 @@
 - Documented database logging env vars and CLI flag usage in the README.
 
 ## Iteration 5
+- Added eligible counts plus full/partial funding metrics, funding gap totals, and full funding rate calculations.
+- Extended database run logging to persist the new allocation health metrics.
+
+## Iteration 5
 - Added CSV export options for awarded and unfunded eligible applicants.
 - Documented CSV export usage in the README.
