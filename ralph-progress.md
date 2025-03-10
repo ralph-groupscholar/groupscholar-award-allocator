@@ -15,3 +15,7 @@
 ## Iteration 4
 - Added optional Postgres logging for allocation runs, with schema-safe setup and batch applicant inserts.
 - Documented database logging env vars and CLI flag usage in the README.
+
+## Iteration 5
+- Added CSV export options for awarded and unfunded eligible applicants.
+- Documented CSV export usage in the README.

@@ -86,6 +86,8 @@ func main() {
 	maxPercent := flag.Float64("max-percent", 1, "Max percent of requested amount to award (0-1]")
 	minScore := flag.Float64("min-score", 0, "Minimum applicant score to be eligible")
 	jsonPath := flag.String("json", "", "Optional path to write JSON output")
+	awardsCSV := flag.String("awards-csv", "", "Optional path to write awarded applicants CSV")
+	unfundedCSV := flag.String("unfunded-csv", "", "Optional path to write unfunded eligible applicants CSV")
 	topN := flag.Int("top", 10, "Number of awarded applicants to display")
 	showAll := flag.Bool("all", false, "Show all awarded applicants")
 	unfundedTop := flag.Int("unfunded", 10, "Number of unfunded eligible applicants to display")
@@ -148,6 +150,20 @@ func main() {
 			exitWith(err.Error())
 		}
 		fmt.Printf("\nJSON written to %s\n", *jsonPath)
+	}
+
+	if *awardsCSV != "" {
+		if err := writeAwardsCSV(*awardsCSV, awarded); err != nil {
+			exitWith(err.Error())
+		}
+		fmt.Printf("\nAwarded CSV written to %s\n", *awardsCSV)
+	}
+
+	if *unfundedCSV != "" {
+		if err := writeUnfundedCSV(*unfundedCSV, summary.Unfunded); err != nil {
+			exitWith(err.Error())
+		}
+		fmt.Printf("\nUnfunded CSV written to %s\n", *unfundedCSV)
 	}
 
 	if *dbLog {
@@ -720,6 +736,73 @@ func writeJSON(path string, summary allocationSummary, awarded []*applicant) err
 		return fmt.Errorf("unable to write JSON output: %w", err)
 	}
 	return nil
+}
+
+func writeAwardsCSV(path string, awarded []*applicant) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("unable to create awards CSV: %w", err)
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	if err := writer.Write([]string{"applicant_id", "name", "need_level", "score", "requested_amount", "awarded_amount", "priority"}); err != nil {
+		return fmt.Errorf("write awards CSV header: %w", err)
+	}
+	for _, item := range awarded {
+		row := []string{
+			item.ID,
+			item.Name,
+			item.NeedLevel,
+			formatFloat(item.ScoreRaw, 1),
+			formatFloat(item.Requested, 2),
+			formatFloat(item.Awarded, 2),
+			formatFloat(item.PriorityScore, 4),
+		}
+		if err := writer.Write(row); err != nil {
+			return fmt.Errorf("write awards CSV row: %w", err)
+		}
+	}
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		return fmt.Errorf("flush awards CSV: %w", err)
+	}
+	return nil
+}
+
+func writeUnfundedCSV(path string, unfunded []awardRecord) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("unable to create unfunded CSV: %w", err)
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	if err := writer.Write([]string{"applicant_id", "name", "need_level", "score", "requested_amount", "priority"}); err != nil {
+		return fmt.Errorf("write unfunded CSV header: %w", err)
+	}
+	for _, item := range unfunded {
+		row := []string{
+			item.ApplicantID,
+			item.Name,
+			item.NeedLevel,
+			formatFloat(item.Score, 1),
+			formatFloat(item.Requested, 2),
+			formatFloat(item.Priority, 4),
+		}
+		if err := writer.Write(row); err != nil {
+			return fmt.Errorf("write unfunded CSV row: %w", err)
+		}
+	}
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		return fmt.Errorf("flush unfunded CSV: %w", err)
+	}
+	return nil
+}
+
+func formatFloat(value float64, decimals int) string {
+	return strconv.FormatFloat(value, 'f', decimals, 64)
 }
 
 type dbConfig struct {
