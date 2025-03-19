@@ -103,6 +103,7 @@ func main() {
 	jsonPath := flag.String("json", "", "Optional path to write JSON output")
 	awardsCSV := flag.String("awards-csv", "", "Optional path to write awarded applicants CSV")
 	unfundedCSV := flag.String("unfunded-csv", "", "Optional path to write unfunded eligible applicants CSV")
+	ineligibleCSV := flag.String("ineligible-csv", "", "Optional path to write ineligible applicants CSV")
 	topN := flag.Int("top", 10, "Number of awarded applicants to display")
 	showAll := flag.Bool("all", false, "Show all awarded applicants")
 	unfundedTop := flag.Int("unfunded", 10, "Number of unfunded eligible applicants to display")
@@ -179,6 +180,13 @@ func main() {
 			exitWith(err.Error())
 		}
 		fmt.Printf("\nUnfunded CSV written to %s\n", *unfundedCSV)
+	}
+
+	if *ineligibleCSV != "" {
+		if err := writeIneligibleCSV(*ineligibleCSV, summary.Ineligible); err != nil {
+			exitWith(err.Error())
+		}
+		fmt.Printf("\nIneligible CSV written to %s\n", *ineligibleCSV)
 	}
 
 	if *dbLog {
@@ -596,6 +604,7 @@ func summarize(applicants []*applicant, budget float64, awarded []*applicant) al
 		IneligibleReasonSummary: ineligibleReasons,
 		Awards:                  buildAwardRecords(awarded),
 		Unfunded:                buildUnfundedRecords(applicants),
+		Ineligible:              buildIneligibleRecords(applicants),
 	}
 }
 
@@ -629,6 +638,24 @@ func buildUnfundedRecords(applicants []*applicant) []awardRecord {
 			Requested:   item.Requested,
 			Awarded:     item.Awarded,
 			Priority:    item.PriorityScore,
+		})
+	}
+	return records
+}
+
+func buildIneligibleRecords(applicants []*applicant) []ineligibleRecord {
+	var records []ineligibleRecord
+	for _, item := range applicants {
+		if item.Eligible {
+			continue
+		}
+		records = append(records, ineligibleRecord{
+			ApplicantID: item.ID,
+			Name:        item.Name,
+			NeedLevel:   item.NeedLevel,
+			Score:       item.ScoreRaw,
+			Requested:   item.Requested,
+			Reason:      item.EligibilityMsg,
 		})
 	}
 	return records
@@ -839,6 +866,37 @@ func writeUnfundedCSV(path string, unfunded []awardRecord) error {
 	writer.Flush()
 	if err := writer.Error(); err != nil {
 		return fmt.Errorf("flush unfunded CSV: %w", err)
+	}
+	return nil
+}
+
+func writeIneligibleCSV(path string, ineligible []ineligibleRecord) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("unable to create ineligible CSV: %w", err)
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	if err := writer.Write([]string{"applicant_id", "name", "need_level", "score", "requested_amount", "eligibility_reason"}); err != nil {
+		return fmt.Errorf("write ineligible CSV header: %w", err)
+	}
+	for _, item := range ineligible {
+		row := []string{
+			item.ApplicantID,
+			item.Name,
+			item.NeedLevel,
+			formatFloat(item.Score, 1),
+			formatFloat(item.Requested, 2),
+			item.Reason,
+		}
+		if err := writer.Write(row); err != nil {
+			return fmt.Errorf("write ineligible CSV row: %w", err)
+		}
+	}
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		return fmt.Errorf("flush ineligible CSV: %w", err)
 	}
 	return nil
 }

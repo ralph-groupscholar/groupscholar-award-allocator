@@ -20,6 +20,10 @@
 - Added eligible counts plus full/partial funding metrics, funding gap totals, and full funding rate calculations.
 - Extended database run logging to persist the new allocation health metrics.
 
-## Iteration 5
+## Iteration 6
 - Added CSV export options for awarded and unfunded eligible applicants.
 - Documented CSV export usage in the README.
+
+## Iteration 7
+- Added ineligible applicant exports in JSON and CSV, including eligibility reason details.
+- Documented the new ineligible CSV output flag in the README.

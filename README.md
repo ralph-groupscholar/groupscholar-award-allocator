@@ -9,8 +9,8 @@ A Go-based CLI that ranks applicants and allocates scholarship awards against a 
 - Summary metrics by need level plus a ranked award list
 - Coverage and unfunded demand signals, including unfunded lists
 - Full vs partial funding rates with total funding gap
-- Optional JSON export for dashboards or downstream analysis
-- Optional CSV exports for awarded and unfunded cohorts
+- Optional JSON export for dashboards or downstream analysis (includes ineligible detail)
+- Optional CSV exports for awarded, unfunded, and ineligible cohorts
 
 ## Usage
 
@@ -43,7 +43,8 @@ To export CSVs:
   -input sample-applicants.csv \
   -budget 20000 \
   -awards-csv awarded.csv \
-  -unfunded-csv unfunded.csv
+  -unfunded-csv unfunded.csv \
+  -ineligible-csv ineligible.csv
 ```
 
 ## Database Logging (Optional)
