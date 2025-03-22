@@ -29,5 +29,9 @@
 - Documented the new ineligible CSV output flag in the README.
 
 ## Iteration 8
+- Added award distribution percentiles, average award-to-request rate, and last-funded cutoff metrics to the summary and JSON output.
+- Extended database logging to persist the new allocation distribution and cutoff fields.
+
+## Iteration 8
 - Added need-level coverage metrics (eligible, awarded, requested, coverage rate) to the summary output and JSON.
 - Logged need-level coverage snapshots to Postgres alongside allocation runs.

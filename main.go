@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sort"
 	"strconv"
@@ -50,8 +51,16 @@ type allocationSummary struct {
 	CoverageRate            float64                    `json:"coverage_rate"`
 	FullFundingRate         float64                    `json:"full_funding_rate"`
 	AverageAward            float64                    `json:"average_award"`
+	AwardP25                float64                    `json:"award_p25"`
+	AwardP50                float64                    `json:"award_p50"`
+	AwardP75                float64                    `json:"award_p75"`
+	AwardToRequestAvg       float64                    `json:"award_to_request_avg"`
 	MinAwarded              float64                    `json:"min_awarded"`
 	MaxAwarded              float64                    `json:"max_awarded"`
+	LastFundedPriority      float64                    `json:"last_funded_priority"`
+	LastFundedScore         float64                    `json:"last_funded_score"`
+	LastFundedNeed          string                     `json:"last_funded_need"`
+	LastFundedRequested     float64                    `json:"last_funded_requested"`
 	ByNeed                  map[string]needAgg         `json:"by_need"`
 	NeedCoverage            map[string]needCoverageAgg `json:"need_coverage"`
 	UnfundedByNeed          map[string]needUnfundedAgg `json:"unfunded_by_need"`
@@ -531,9 +540,20 @@ func summarize(applicants []*applicant, budget float64, awarded []*applicant) al
 	var eligibleRequestedTotal float64
 	var fullyFundedCount int
 	var partiallyFundedCount int
+	var awardAmounts []float64
+	var awardRates []float64
+	var lastFundedPriority float64
+	var lastFundedScore float64
+	var lastFundedNeed string
+	var lastFundedRequested float64
 	if len(awarded) > 0 {
 		minAward = awarded[0].Awarded
 		maxAward = awarded[0].Awarded
+		lastAward := awarded[len(awarded)-1]
+		lastFundedPriority = lastAward.PriorityScore
+		lastFundedScore = lastAward.ScoreRaw
+		lastFundedNeed = lastAward.NeedLevel
+		lastFundedRequested = lastAward.Requested
 	}
 
 	for _, item := range applicants {
@@ -574,6 +594,10 @@ func summarize(applicants []*applicant, budget float64, awarded []*applicant) al
 
 	for _, item := range awarded {
 		budgetUsed += item.Awarded
+		awardAmounts = append(awardAmounts, item.Awarded)
+		if item.Requested > 0 {
+			awardRates = append(awardRates, item.Awarded/item.Requested)
+		}
 		if item.Awarded < minAward {
 			minAward = item.Awarded
 		}
@@ -610,6 +634,10 @@ func summarize(applicants []*applicant, budget float64, awarded []*applicant) al
 	if eligibleCount > 0 {
 		fullFundingRate = float64(fullyFundedCount) / float64(eligibleCount)
 	}
+	awardP25 := percentile(awardAmounts, 0.25)
+	awardP50 := percentile(awardAmounts, 0.50)
+	awardP75 := percentile(awardAmounts, 0.75)
+	awardToRequestAvg := averageFloat(awardRates)
 
 	return allocationSummary{
 		GeneratedAt:             time.Now().Format(time.RFC3339),
@@ -629,8 +657,16 @@ func summarize(applicants []*applicant, budget float64, awarded []*applicant) al
 		CoverageRate:            coverageRate,
 		FullFundingRate:         fullFundingRate,
 		AverageAward:            averageAward,
+		AwardP25:                awardP25,
+		AwardP50:                awardP50,
+		AwardP75:                awardP75,
+		AwardToRequestAvg:       awardToRequestAvg,
 		MinAwarded:              minAward,
 		MaxAwarded:              maxAward,
+		LastFundedPriority:      lastFundedPriority,
+		LastFundedScore:         lastFundedScore,
+		LastFundedNeed:          lastFundedNeed,
+		LastFundedRequested:     lastFundedRequested,
 		ByNeed:                  byNeed,
 		NeedCoverage:            needCoverage,
 		UnfundedByNeed:          unfundedByNeed,
@@ -710,7 +746,17 @@ func printSummary(summary allocationSummary) {
 	fmt.Printf("Budget Used:  $%.2f\n", summary.BudgetUsed)
 	fmt.Printf("Budget Left:  $%.2f\n", summary.BudgetLeft)
 	fmt.Printf("Average Award $%.2f\n", summary.AverageAward)
+	fmt.Printf("Award Percentiles: P25 $%.2f | P50 $%.2f | P75 $%.2f\n", summary.AwardP25, summary.AwardP50, summary.AwardP75)
+	fmt.Printf("Avg Award/Request: %.1f%%\n", summary.AwardToRequestAvg*100)
 	fmt.Printf("Award Range:  $%.2f - $%.2f\n", summary.MinAwarded, summary.MaxAwarded)
+	if summary.AwardedCount > 0 {
+		fmt.Printf("Last Funded Cutoff: %.2f priority | %.1f score | %s need | $%.2f requested\n",
+			summary.LastFundedPriority,
+			summary.LastFundedScore,
+			strings.Title(summary.LastFundedNeed),
+			summary.LastFundedRequested,
+		)
+	}
 	printIneligibleReasons(summary.IneligibleReasonSummary)
 	fmt.Println("\nBy Need Level")
 	fmt.Println(strings.Repeat("-", 13))
@@ -960,6 +1006,65 @@ func formatFloat(value float64, decimals int) string {
 	return strconv.FormatFloat(value, 'f', decimals, 64)
 }
 
+func percentile(values []float64, p float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	if p <= 0 {
+		return minFloat(values)
+	}
+	if p >= 1 {
+		return maxFloat(values)
+	}
+	sorted := append([]float64(nil), values...)
+	sort.Float64s(sorted)
+	rank := int(math.Ceil(p*float64(len(sorted)))) - 1
+	if rank < 0 {
+		rank = 0
+	}
+	if rank >= len(sorted) {
+		rank = len(sorted) - 1
+	}
+	return sorted[rank]
+}
+
+func averageFloat(values []float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	var sum float64
+	for _, value := range values {
+		sum += value
+	}
+	return sum / float64(len(values))
+}
+
+func minFloat(values []float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	min := values[0]
+	for _, value := range values[1:] {
+		if value < min {
+			min = value
+		}
+	}
+	return min
+}
+
+func maxFloat(values []float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	max := values[0]
+	for _, value := range values[1:] {
+		if value > max {
+			max = value
+		}
+	}
+	return max
+}
+
 type dbConfig struct {
 	Enabled bool
 	URL     string
@@ -1062,8 +1167,16 @@ CREATE TABLE IF NOT EXISTS %s.runs (
   coverage_rate numeric NOT NULL,
   full_funding_rate numeric NOT NULL,
   average_award numeric NOT NULL,
+  award_p25 numeric NOT NULL,
+  award_p50 numeric NOT NULL,
+  award_p75 numeric NOT NULL,
+  award_to_request_avg numeric NOT NULL,
   min_awarded numeric NOT NULL,
   max_awarded numeric NOT NULL,
+  last_funded_priority numeric NOT NULL,
+  last_funded_score numeric NOT NULL,
+  last_funded_need text NOT NULL,
+  last_funded_requested numeric NOT NULL,
   min_award_option numeric NOT NULL,
   max_award_option numeric NOT NULL,
   score_weight numeric NOT NULL,
@@ -1135,7 +1248,15 @@ ALTER TABLE %s.runs
   ADD COLUMN IF NOT EXISTS fully_funded_count int NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS partially_funded_count int NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS funding_gap_total numeric NOT NULL DEFAULT 0,
-  ADD COLUMN IF NOT EXISTS full_funding_rate numeric NOT NULL DEFAULT 0;`, schema)
+  ADD COLUMN IF NOT EXISTS full_funding_rate numeric NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS award_p25 numeric NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS award_p50 numeric NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS award_p75 numeric NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS award_to_request_avg numeric NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS last_funded_priority numeric NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS last_funded_score numeric NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS last_funded_need text NOT NULL DEFAULT '',
+  ADD COLUMN IF NOT EXISTS last_funded_requested numeric NOT NULL DEFAULT 0;`, schema)
 	if _, err := pool.Exec(ctx, alter); err != nil {
 		return fmt.Errorf("alter runs table: %w", err)
 	}
@@ -1164,8 +1285,16 @@ func insertRun(ctx context.Context, pool *pgxpool.Pool, schema string, runID uui
 			"coverage_rate",
 			"full_funding_rate",
 			"average_award",
+			"award_p25",
+			"award_p50",
+			"award_p75",
+			"award_to_request_avg",
 			"min_awarded",
 			"max_awarded",
+			"last_funded_priority",
+			"last_funded_score",
+			"last_funded_need",
+			"last_funded_requested",
 			"min_award_option",
 			"max_award_option",
 			"score_weight",
@@ -1195,8 +1324,16 @@ func insertRun(ctx context.Context, pool *pgxpool.Pool, schema string, runID uui
 			summary.CoverageRate,
 			summary.FullFundingRate,
 			summary.AverageAward,
+			summary.AwardP25,
+			summary.AwardP50,
+			summary.AwardP75,
+			summary.AwardToRequestAvg,
 			summary.MinAwarded,
 			summary.MaxAwarded,
+			summary.LastFundedPriority,
+			summary.LastFundedScore,
+			summary.LastFundedNeed,
+			summary.LastFundedRequested,
 			opts.MinAward,
 			opts.MaxAward,
 			opts.ScoreWeight,
