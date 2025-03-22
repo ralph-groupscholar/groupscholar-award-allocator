@@ -27,3 +27,7 @@
 ## Iteration 7
 - Added ineligible applicant exports in JSON and CSV, including eligibility reason details.
 - Documented the new ineligible CSV output flag in the README.
+
+## Iteration 8
+- Added need-level coverage metrics (eligible, awarded, requested, coverage rate) to the summary output and JSON.
+- Logged need-level coverage snapshots to Postgres alongside allocation runs.

@@ -53,6 +53,7 @@ type allocationSummary struct {
 	MinAwarded              float64                    `json:"min_awarded"`
 	MaxAwarded              float64                    `json:"max_awarded"`
 	ByNeed                  map[string]needAgg         `json:"by_need"`
+	NeedCoverage            map[string]needCoverageAgg `json:"need_coverage"`
 	UnfundedByNeed          map[string]needUnfundedAgg `json:"unfunded_by_need"`
 	IneligibleReasonSummary map[string]int             `json:"ineligible_reasons"`
 	Awards                  []awardRecord              `json:"awards"`
@@ -63,6 +64,15 @@ type allocationSummary struct {
 type needAgg struct {
 	AwardedCount int     `json:"awarded_count"`
 	BudgetUsed   float64 `json:"budget_used"`
+}
+
+type needCoverageAgg struct {
+	EligibleCount  int     `json:"eligible_count"`
+	AwardedCount   int     `json:"awarded_count"`
+	UnfundedCount  int     `json:"unfunded_count"`
+	RequestedTotal float64 `json:"requested_total"`
+	AwardedTotal   float64 `json:"awarded_total"`
+	CoverageRate   float64 `json:"coverage_rate"`
 }
 
 type needUnfundedAgg struct {
@@ -499,6 +509,11 @@ func summarize(applicants []*applicant, budget float64, awarded []*applicant) al
 		"medium": {},
 		"high":   {},
 	}
+	needCoverage := map[string]needCoverageAgg{
+		"low":    {},
+		"medium": {},
+		"high":   {},
+	}
 	unfundedByNeed := map[string]needUnfundedAgg{
 		"low":    {},
 		"medium": {},
@@ -531,6 +546,13 @@ func summarize(applicants []*applicant, budget float64, awarded []*applicant) al
 		}
 		eligibleCount++
 		eligibleRequestedTotal += item.Requested
+		coverage := needCoverage[item.NeedLevel]
+		coverage.EligibleCount++
+		coverage.RequestedTotal += item.Requested
+		if item.Awarded > 0 {
+			coverage.AwardedCount++
+			coverage.AwardedTotal += item.Awarded
+		}
 		if item.Awarded == 0 {
 			unfundedCount++
 			unfundedAmount += item.Requested
@@ -538,6 +560,8 @@ func summarize(applicants []*applicant, budget float64, awarded []*applicant) al
 			agg.Count++
 			agg.Requested += item.Requested
 			unfundedByNeed[item.NeedLevel] = agg
+			coverage.UnfundedCount++
+			needCoverage[item.NeedLevel] = coverage
 			continue
 		}
 		if item.Awarded >= item.Requested {
@@ -545,6 +569,7 @@ func summarize(applicants []*applicant, budget float64, awarded []*applicant) al
 		} else {
 			partiallyFundedCount++
 		}
+		needCoverage[item.NeedLevel] = coverage
 	}
 
 	for _, item := range awarded {
@@ -560,6 +585,13 @@ func summarize(applicants []*applicant, budget float64, awarded []*applicant) al
 		agg.AwardedCount++
 		agg.BudgetUsed += item.Awarded
 		byNeed[item.NeedLevel] = agg
+	}
+
+	for level, coverage := range needCoverage {
+		if coverage.RequestedTotal > 0 {
+			coverage.CoverageRate = coverage.AwardedTotal / coverage.RequestedTotal
+		}
+		needCoverage[level] = coverage
 	}
 
 	averageAward := 0.0
@@ -600,6 +632,7 @@ func summarize(applicants []*applicant, budget float64, awarded []*applicant) al
 		MinAwarded:              minAward,
 		MaxAwarded:              maxAward,
 		ByNeed:                  byNeed,
+		NeedCoverage:            needCoverage,
 		UnfundedByNeed:          unfundedByNeed,
 		IneligibleReasonSummary: ineligibleReasons,
 		Awards:                  buildAwardRecords(awarded),
@@ -686,7 +719,29 @@ func printSummary(summary allocationSummary) {
 		agg := summary.ByNeed[level]
 		fmt.Printf("%s: %d awarded ($%.2f)\n", strings.Title(level), agg.AwardedCount, agg.BudgetUsed)
 	}
+	printNeedCoverage(summary.NeedCoverage)
 	printUnfundedByNeed(summary.UnfundedByNeed)
+}
+
+func printNeedCoverage(coverage map[string]needCoverageAgg) {
+	if len(coverage) == 0 {
+		return
+	}
+	fmt.Println("\nNeed Coverage")
+	fmt.Println(strings.Repeat("-", 13))
+	needKeys := []string{"high", "medium", "low"}
+	for _, level := range needKeys {
+		agg := coverage[level]
+		fmt.Printf("%s: %d eligible | %d awarded | %d unfunded | $%.2f requested | $%.2f awarded | %.1f%% coverage\n",
+			strings.Title(level),
+			agg.EligibleCount,
+			agg.AwardedCount,
+			agg.UnfundedCount,
+			agg.RequestedTotal,
+			agg.AwardedTotal,
+			agg.CoverageRate*100,
+		)
+	}
 }
 
 func printIneligibleReasons(reasons map[string]int) {
@@ -974,6 +1029,9 @@ func logRunToDatabase(ctx context.Context, cfg dbConfig, summary allocationSumma
 	if err := insertApplicants(ctx, pool, cfg.Schema, runID, applicants); err != nil {
 		return err
 	}
+	if err := insertNeedCoverage(ctx, pool, cfg.Schema, runID, summary.NeedCoverage); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1045,6 +1103,27 @@ CREATE TABLE IF NOT EXISTS %s.applicants (
 	indexSQL := fmt.Sprintf("CREATE INDEX IF NOT EXISTS applicants_run_id_idx ON %s.applicants(run_id);", schema)
 	if _, err := pool.Exec(ctx, indexSQL); err != nil {
 		return fmt.Errorf("create index: %w", err)
+	}
+
+	needCoverageTable := fmt.Sprintf(`
+CREATE TABLE IF NOT EXISTS %s.need_coverage (
+  id bigserial PRIMARY KEY,
+  run_id uuid NOT NULL REFERENCES %s.runs(run_id) ON DELETE CASCADE,
+  need_level text NOT NULL,
+  eligible_count int NOT NULL,
+  awarded_count int NOT NULL,
+  unfunded_count int NOT NULL,
+  requested_total numeric NOT NULL,
+  awarded_total numeric NOT NULL,
+  coverage_rate numeric NOT NULL
+);`, schema, schema)
+	if _, err := pool.Exec(ctx, needCoverageTable); err != nil {
+		return fmt.Errorf("create need_coverage table: %w", err)
+	}
+
+	coverageIndex := fmt.Sprintf("CREATE INDEX IF NOT EXISTS need_coverage_run_id_idx ON %s.need_coverage(run_id);", schema)
+	if _, err := pool.Exec(ctx, coverageIndex); err != nil {
+		return fmt.Errorf("create need_coverage index: %w", err)
 	}
 	return nil
 }
@@ -1188,6 +1267,51 @@ func insertApplicants(ctx context.Context, pool *pgxpool.Pool, schema string, ru
 		if _, err := pool.Exec(ctx, query, args...); err != nil {
 			return fmt.Errorf("insert applicants: %w", err)
 		}
+	}
+	return nil
+}
+
+func insertNeedCoverage(ctx context.Context, pool *pgxpool.Pool, schema string, runID uuid.UUID, coverage map[string]needCoverageAgg) error {
+	if len(coverage) == 0 {
+		return nil
+	}
+	builder := sq.Insert(schema+".need_coverage").
+		Columns(
+			"run_id",
+			"need_level",
+			"eligible_count",
+			"awarded_count",
+			"unfunded_count",
+			"requested_total",
+			"awarded_total",
+			"coverage_rate",
+		).
+		PlaceholderFormat(sq.Dollar)
+
+	levels := []string{"high", "medium", "low"}
+	for _, level := range levels {
+		agg, ok := coverage[level]
+		if !ok {
+			continue
+		}
+		builder = builder.Values(
+			runID,
+			level,
+			agg.EligibleCount,
+			agg.AwardedCount,
+			agg.UnfundedCount,
+			agg.RequestedTotal,
+			agg.AwardedTotal,
+			agg.CoverageRate,
+		)
+	}
+
+	query, args, err := builder.ToSql()
+	if err != nil {
+		return fmt.Errorf("build need coverage insert: %w", err)
+	}
+	if _, err := pool.Exec(ctx, query, args...); err != nil {
+		return fmt.Errorf("insert need coverage: %w", err)
 	}
 	return nil
 }

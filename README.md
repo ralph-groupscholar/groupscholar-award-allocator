@@ -9,6 +9,7 @@ A Go-based CLI that ranks applicants and allocates scholarship awards against a 
 - Summary metrics by need level plus a ranked award list
 - Coverage and unfunded demand signals, including unfunded lists
 - Full vs partial funding rates with total funding gap
+- Need-level coverage metrics (eligible, awarded, requested, coverage rate)
 - Optional JSON export for dashboards or downstream analysis (includes ineligible detail)
 - Optional CSV exports for awarded, unfunded, and ineligible cohorts
 
@@ -50,6 +51,7 @@ To export CSVs:
 ## Database Logging (Optional)
 
 Enable run logging to Postgres for longitudinal analysis.
+Run logging stores per-run summaries, applicant-level records, and need-level coverage snapshots.
 
 Set environment variables:
 
