@@ -35,3 +35,11 @@
 ## Iteration 8
 - Added need-level coverage metrics (eligible, awarded, requested, coverage rate) to the summary output and JSON.
 - Logged need-level coverage snapshots to Postgres alongside allocation runs.
+
+## Iteration 9
+- Added budget shortfall/full-funding requirement metrics and need equity share deltas to the allocation summary and JSON output.
+- Extended Postgres logging to persist budget requirement fields and need-level share deltas.
+
+## Iteration 9
+- Added Markdown report export for allocation summaries with awards, unfunded, and need coverage tables.
+- Added Go test coverage for award calculation, reserve allocation, and summary metrics.

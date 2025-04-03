@@ -38,6 +38,8 @@ type allocationSummary struct {
 	Budget                  float64                    `json:"budget"`
 	BudgetUsed              float64                    `json:"budget_used"`
 	BudgetLeft              float64                    `json:"budget_left"`
+	BudgetRequiredFull      float64                    `json:"budget_required_full"`
+	BudgetShortfall         float64                    `json:"budget_shortfall"`
 	Applicants              int                        `json:"applicants"`
 	EligibleCount           int                        `json:"eligible_count"`
 	AwardedCount            int                        `json:"awarded_count"`
@@ -82,6 +84,9 @@ type needCoverageAgg struct {
 	RequestedTotal float64 `json:"requested_total"`
 	AwardedTotal   float64 `json:"awarded_total"`
 	CoverageRate   float64 `json:"coverage_rate"`
+	RequestedShare float64 `json:"requested_share"`
+	AwardedShare   float64 `json:"awarded_share"`
+	ShareDelta     float64 `json:"share_delta"`
 }
 
 type needUnfundedAgg struct {
@@ -116,6 +121,8 @@ func main() {
 	scoreWeight := flag.Float64("score-weight", 0.7, "Weight for applicant score (0-1)")
 	needWeight := flag.Float64("need-weight", 0.3, "Weight for need level (0-1)")
 	reserveHigh := flag.Float64("reserve-high", 0, "Share of budget reserved for high-need applicants (0-1)")
+	reserveMedium := flag.Float64("reserve-medium", 0, "Share of budget reserved for medium-need applicants (0-1)")
+	reserveLow := flag.Float64("reserve-low", 0, "Share of budget reserved for low-need applicants (0-1)")
 	roundTo := flag.Float64("round", 0, "Round awards to nearest increment (0 disables)")
 	maxPercent := flag.Float64("max-percent", 1, "Max percent of requested amount to award (0-1]")
 	minScore := flag.Float64("min-score", 0, "Minimum applicant score to be eligible")
@@ -123,6 +130,7 @@ func main() {
 	awardsCSV := flag.String("awards-csv", "", "Optional path to write awarded applicants CSV")
 	unfundedCSV := flag.String("unfunded-csv", "", "Optional path to write unfunded eligible applicants CSV")
 	ineligibleCSV := flag.String("ineligible-csv", "", "Optional path to write ineligible applicants CSV")
+	reportPath := flag.String("report", "", "Optional path to write Markdown allocation report")
 	topN := flag.Int("top", 10, "Number of awarded applicants to display")
 	showAll := flag.Bool("all", false, "Show all awarded applicants")
 	unfundedTop := flag.Int("unfunded", 10, "Number of unfunded eligible applicants to display")
@@ -141,6 +149,15 @@ func main() {
 	}
 	if *reserveHigh < 0 || *reserveHigh > 1 {
 		exitWith("reserve-high must be between 0 and 1")
+	}
+	if *reserveMedium < 0 || *reserveMedium > 1 {
+		exitWith("reserve-medium must be between 0 and 1")
+	}
+	if *reserveLow < 0 || *reserveLow > 1 {
+		exitWith("reserve-low must be between 0 and 1")
+	}
+	if *reserveHigh+*reserveMedium+*reserveLow > 1 {
+		exitWith("reserve shares must sum to 1 or less")
 	}
 	if *roundTo < 0 {
 		exitWith("round must be >= 0")
@@ -166,7 +183,7 @@ func main() {
 	assignPriority(applicants, *scoreWeight, *needWeight)
 	sortApplicants(applicants)
 
-	awarded := allocateBudget(applicants, *budget, *minAward, *maxAward, *reserveHigh, *roundTo, *maxPercent)
+	awarded := allocateBudget(applicants, *budget, *minAward, *maxAward, *reserveHigh, *reserveMedium, *reserveLow, *roundTo, *maxPercent)
 	if len(warnings) > 0 {
 		fmt.Println("Warnings:")
 		for _, warning := range warnings {
@@ -208,6 +225,13 @@ func main() {
 		fmt.Printf("\nIneligible CSV written to %s\n", *ineligibleCSV)
 	}
 
+	if *reportPath != "" {
+		if err := writeReport(*reportPath, summary, *topN, *showAll, *unfundedTop, *showAllUnfunded); err != nil {
+			exitWith(err.Error())
+		}
+		fmt.Printf("\nMarkdown report written to %s\n", *reportPath)
+	}
+
 	if *dbLog {
 		dbConfig, err := loadDBConfig()
 		if err != nil {
@@ -218,14 +242,16 @@ func main() {
 			ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 			defer cancel()
 			opts := dbRunOptions{
-				MinAward:    *minAward,
-				MaxAward:    *maxAward,
-				ScoreWeight: *scoreWeight,
-				NeedWeight:  *needWeight,
-				ReserveHigh: *reserveHigh,
-				RoundTo:     *roundTo,
-				MaxPercent:  *maxPercent,
-				MinScore:    *minScore,
+				MinAward:      *minAward,
+				MaxAward:      *maxAward,
+				ScoreWeight:   *scoreWeight,
+				NeedWeight:    *needWeight,
+				ReserveHigh:   *reserveHigh,
+				ReserveMedium: *reserveMedium,
+				ReserveLow:    *reserveLow,
+				RoundTo:       *roundTo,
+				MaxPercent:    *maxPercent,
+				MinScore:      *minScore,
 			}
 			if err := logRunToDatabase(ctx, dbConfig, summary, applicants, *inputPath, opts); err != nil {
 				fmt.Fprintf(os.Stderr, "DB logging failed: %v\n", err)
@@ -423,18 +449,36 @@ func sortApplicants(applicants []*applicant) {
 	})
 }
 
-func allocateBudget(applicants []*applicant, budget, minAward, maxAward, reserveHigh, roundTo, maxPercent float64) []*applicant {
+func allocateBudget(applicants []*applicant, budget, minAward, maxAward, reserveHigh, reserveMedium, reserveLow, roundTo, maxPercent float64) []*applicant {
 	remaining := budget
 	var awarded []*applicant
 
-	if reserveHigh > 0 {
-		reserved := budget * reserveHigh
+	reserves := []struct {
+		level string
+		share float64
+	}{
+		{level: "high", share: reserveHigh},
+		{level: "medium", share: reserveMedium},
+		{level: "low", share: reserveLow},
+	}
+
+	for _, reserve := range reserves {
+		if reserve.share <= 0 {
+			continue
+		}
+		reserved := budget * reserve.share
+		if reserved <= 0 {
+			continue
+		}
 		reservedAwards := allocatePass(applicants, reserved, minAward, maxAward, roundTo, maxPercent, func(item *applicant) bool {
-			return item.NeedLevel == "high"
+			return item.NeedLevel == reserve.level && item.Awarded == 0
 		})
 		awarded = append(awarded, reservedAwards...)
-		usedReserved := totalAwarded(reservedAwards)
-		remaining = budget - usedReserved
+		remaining -= totalAwarded(reservedAwards)
+	}
+
+	if remaining < 0 {
+		remaining = 0
 	}
 
 	remainingAwards := allocatePass(applicants, remaining, minAward, maxAward, roundTo, maxPercent, func(item *applicant) bool {
@@ -618,6 +662,17 @@ func summarize(applicants []*applicant, budget float64, awarded []*applicant) al
 		needCoverage[level] = coverage
 	}
 
+	for level, coverage := range needCoverage {
+		if eligibleRequestedTotal > 0 {
+			coverage.RequestedShare = coverage.RequestedTotal / eligibleRequestedTotal
+		}
+		if budgetUsed > 0 {
+			coverage.AwardedShare = coverage.AwardedTotal / budgetUsed
+		}
+		coverage.ShareDelta = coverage.AwardedShare - coverage.RequestedShare
+		needCoverage[level] = coverage
+	}
+
 	averageAward := 0.0
 	if len(awarded) > 0 {
 		averageAward = budgetUsed / float64(len(awarded))
@@ -629,6 +684,10 @@ func summarize(applicants []*applicant, budget float64, awarded []*applicant) al
 	fundingGapTotal := eligibleRequestedTotal - budgetUsed
 	if fundingGapTotal < 0 {
 		fundingGapTotal = 0
+	}
+	budgetShortfall := eligibleRequestedTotal - budget
+	if budgetShortfall < 0 {
+		budgetShortfall = 0
 	}
 	fullFundingRate := 0.0
 	if eligibleCount > 0 {
@@ -644,6 +703,8 @@ func summarize(applicants []*applicant, budget float64, awarded []*applicant) al
 		Budget:                  budget,
 		BudgetUsed:              budgetUsed,
 		BudgetLeft:              budget - budgetUsed,
+		BudgetRequiredFull:      eligibleRequestedTotal,
+		BudgetShortfall:         budgetShortfall,
 		Applicants:              len(applicants),
 		EligibleCount:           eligibleCount,
 		AwardedCount:            len(awarded),
@@ -739,6 +800,8 @@ func printSummary(summary allocationSummary) {
 	fmt.Printf("Ineligible:   %d\n", summary.IneligibleCount)
 	fmt.Printf("Eligible Unfunded: %d ($%.2f requested)\n", summary.EligibleUnfundedCount, summary.EligibleUnfundedAmount)
 	fmt.Printf("Eligible Requested: $%.2f\n", summary.EligibleRequestedTotal)
+	fmt.Printf("Budget Required (Full Funding): $%.2f\n", summary.BudgetRequiredFull)
+	fmt.Printf("Budget Shortfall: $%.2f\n", summary.BudgetShortfall)
 	fmt.Printf("Coverage Rate: %.1f%%\n", summary.CoverageRate*100)
 	fmt.Printf("Fully Funded: %d (%.1f%% of eligible)\n", summary.FullyFundedCount, summary.FullFundingRate*100)
 	fmt.Printf("Partially Funded: %d\n", summary.PartiallyFundedCount)
@@ -766,6 +829,7 @@ func printSummary(summary allocationSummary) {
 		fmt.Printf("%s: %d awarded ($%.2f)\n", strings.Title(level), agg.AwardedCount, agg.BudgetUsed)
 	}
 	printNeedCoverage(summary.NeedCoverage)
+	printNeedEquity(summary.NeedCoverage)
 	printUnfundedByNeed(summary.UnfundedByNeed)
 }
 
@@ -786,6 +850,24 @@ func printNeedCoverage(coverage map[string]needCoverageAgg) {
 			agg.RequestedTotal,
 			agg.AwardedTotal,
 			agg.CoverageRate*100,
+		)
+	}
+}
+
+func printNeedEquity(coverage map[string]needCoverageAgg) {
+	if len(coverage) == 0 {
+		return
+	}
+	fmt.Println("\nNeed Equity (Requested vs Awarded Share)")
+	fmt.Println(strings.Repeat("-", 38))
+	needKeys := []string{"high", "medium", "low"}
+	for _, level := range needKeys {
+		agg := coverage[level]
+		fmt.Printf("%s: %.1f%% requested | %.1f%% awarded | %+0.1f%% delta\n",
+			strings.Title(level),
+			agg.RequestedShare*100,
+			agg.AwardedShare*100,
+			agg.ShareDelta*100,
 		)
 	}
 }
@@ -1002,8 +1084,162 @@ func writeIneligibleCSV(path string, ineligible []ineligibleRecord) error {
 	return nil
 }
 
+func writeReport(path string, summary allocationSummary, topN int, showAll bool, unfundedTop int, showAllUnfunded bool) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("unable to create report: %w", err)
+	}
+	defer file.Close()
+
+	fmt.Fprintln(file, "# Award Allocation Report")
+	fmt.Fprintf(file, "\nGenerated: %s\n", summary.GeneratedAt)
+
+	fmt.Fprintln(file, "\n## Budget")
+	fmt.Fprintf(file, "- Budget: %s\n", formatCurrency(summary.Budget))
+	fmt.Fprintf(file, "- Budget used: %s\n", formatCurrency(summary.BudgetUsed))
+	fmt.Fprintf(file, "- Budget left: %s\n", formatCurrency(summary.BudgetLeft))
+
+	fmt.Fprintln(file, "\n## Eligibility")
+	fmt.Fprintf(file, "- Applicants: %d\n", summary.Applicants)
+	fmt.Fprintf(file, "- Eligible: %d\n", summary.EligibleCount)
+	fmt.Fprintf(file, "- Awarded: %d\n", summary.AwardedCount)
+	fmt.Fprintf(file, "- Ineligible: %d\n", summary.IneligibleCount)
+	fmt.Fprintf(file, "- Eligible unfunded: %d (%s requested)\n", summary.EligibleUnfundedCount, formatCurrency(summary.EligibleUnfundedAmount))
+	fmt.Fprintf(file, "- Eligible requested: %s\n", formatCurrency(summary.EligibleRequestedTotal))
+	fmt.Fprintf(file, "- Coverage rate: %s\n", formatPercent(summary.CoverageRate))
+	fmt.Fprintf(file, "- Fully funded: %d (%s of eligible)\n", summary.FullyFundedCount, formatPercent(summary.FullFundingRate))
+	fmt.Fprintf(file, "- Partially funded: %d\n", summary.PartiallyFundedCount)
+	fmt.Fprintf(file, "- Funding gap: %s\n", formatCurrency(summary.FundingGapTotal))
+	fmt.Fprintf(file, "- Average award: %s\n", formatCurrency(summary.AverageAward))
+	fmt.Fprintf(file, "- Award percentiles: P25 %s | P50 %s | P75 %s\n", formatCurrency(summary.AwardP25), formatCurrency(summary.AwardP50), formatCurrency(summary.AwardP75))
+	fmt.Fprintf(file, "- Avg award/request: %s\n", formatPercent(summary.AwardToRequestAvg))
+	fmt.Fprintf(file, "- Award range: %s - %s\n", formatCurrency(summary.MinAwarded), formatCurrency(summary.MaxAwarded))
+
+	if summary.AwardedCount > 0 {
+		fmt.Fprintf(file, "- Last funded cutoff: %.2f priority | %.1f score | %s need | %s requested\n",
+			summary.LastFundedPriority,
+			summary.LastFundedScore,
+			strings.Title(summary.LastFundedNeed),
+			formatCurrency(summary.LastFundedRequested),
+		)
+	}
+
+	fmt.Fprintln(file, "\n## Awards")
+	awardRows := limitAwardRecords(summary.Awards, topN, showAll)
+	if len(awardRows) == 0 {
+		fmt.Fprintln(file, "_No awards allocated._")
+	} else {
+		fmt.Fprintln(file, "| Rank | Applicant | Need | Score | Requested | Awarded | Priority |")
+		fmt.Fprintln(file, "| --- | --- | --- | --- | --- | --- | --- |")
+		for i, item := range awardRows {
+			fmt.Fprintf(file, "| %d | %s | %s | %.1f | %s | %s | %.2f |\n",
+				i+1,
+				formatApplicantLabel(item.ApplicantID, item.Name),
+				strings.Title(item.NeedLevel),
+				item.Score,
+				formatCurrency(item.Requested),
+				formatCurrency(item.Awarded),
+				item.Priority,
+			)
+		}
+		if !showAll && topN > 0 && len(summary.Awards) > len(awardRows) {
+			fmt.Fprintf(file, "\n_Showing top %d of %d awards._\n", len(awardRows), len(summary.Awards))
+		}
+	}
+
+	fmt.Fprintln(file, "\n## Unfunded Eligible Applicants")
+	unfundedRows := limitAwardRecords(summary.Unfunded, unfundedTop, showAllUnfunded)
+	if len(unfundedRows) == 0 {
+		fmt.Fprintln(file, "_No eligible unfunded applicants._")
+	} else {
+		fmt.Fprintln(file, "| Rank | Applicant | Need | Score | Requested | Priority |")
+		fmt.Fprintln(file, "| --- | --- | --- | --- | --- | --- |")
+		for i, item := range unfundedRows {
+			fmt.Fprintf(file, "| %d | %s | %s | %.1f | %s | %.2f |\n",
+				i+1,
+				formatApplicantLabel(item.ApplicantID, item.Name),
+				strings.Title(item.NeedLevel),
+				item.Score,
+				formatCurrency(item.Requested),
+				item.Priority,
+			)
+		}
+		if !showAllUnfunded && unfundedTop > 0 && len(summary.Unfunded) > len(unfundedRows) {
+			fmt.Fprintf(file, "\n_Showing top %d of %d unfunded applicants._\n", len(unfundedRows), len(summary.Unfunded))
+		}
+	}
+
+	fmt.Fprintln(file, "\n## Need Coverage")
+	fmt.Fprintln(file, "| Need Level | Eligible | Awarded | Unfunded | Requested | Awarded Total | Coverage |")
+	fmt.Fprintln(file, "| --- | --- | --- | --- | --- | --- | --- |")
+	needKeys := []string{"high", "medium", "low"}
+	for _, level := range needKeys {
+		agg := summary.NeedCoverage[level]
+		fmt.Fprintf(file, "| %s | %d | %d | %d | %s | %s | %s |\n",
+			strings.Title(level),
+			agg.EligibleCount,
+			agg.AwardedCount,
+			agg.UnfundedCount,
+			formatCurrency(agg.RequestedTotal),
+			formatCurrency(agg.AwardedTotal),
+			formatPercent(agg.CoverageRate),
+		)
+	}
+
+	if len(summary.IneligibleReasonSummary) > 0 {
+		fmt.Fprintln(file, "\n## Ineligible Reasons")
+		reasonRows := sortReasonSummary(summary.IneligibleReasonSummary)
+		for _, item := range reasonRows {
+			fmt.Fprintf(file, "- %s: %d\n", item.Reason, item.Count)
+		}
+	}
+
+	return nil
+}
+
 func formatFloat(value float64, decimals int) string {
 	return strconv.FormatFloat(value, 'f', decimals, 64)
+}
+
+func formatCurrency(value float64) string {
+	return fmt.Sprintf("$%.2f", value)
+}
+
+func formatPercent(value float64) string {
+	return fmt.Sprintf("%.1f%%", value*100)
+}
+
+func formatApplicantLabel(id, name string) string {
+	if name == "" {
+		return id
+	}
+	return fmt.Sprintf("%s (%s)", name, id)
+}
+
+func limitAwardRecords(records []awardRecord, limit int, showAll bool) []awardRecord {
+	if showAll || limit <= 0 || limit >= len(records) {
+		return records
+	}
+	return records[:limit]
+}
+
+type reasonSummary struct {
+	Reason string
+	Count  int
+}
+
+func sortReasonSummary(reasons map[string]int) []reasonSummary {
+	list := make([]reasonSummary, 0, len(reasons))
+	for reason, count := range reasons {
+		list = append(list, reasonSummary{Reason: reason, Count: count})
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].Count == list[j].Count {
+			return list[i].Reason < list[j].Reason
+		}
+		return list[i].Count > list[j].Count
+	})
+	return list
 }
 
 func percentile(values []float64, p float64) float64 {
@@ -1072,14 +1308,16 @@ type dbConfig struct {
 }
 
 type dbRunOptions struct {
-	MinAward    float64
-	MaxAward    float64
-	ScoreWeight float64
-	NeedWeight  float64
-	ReserveHigh float64
-	RoundTo     float64
-	MaxPercent  float64
-	MinScore    float64
+	MinAward      float64
+	MaxAward      float64
+	ScoreWeight   float64
+	NeedWeight    float64
+	ReserveHigh   float64
+	ReserveMedium float64
+	ReserveLow    float64
+	RoundTo       float64
+	MaxPercent    float64
+	MinScore      float64
 }
 
 func loadDBConfig() (dbConfig, error) {
@@ -1154,6 +1392,8 @@ CREATE TABLE IF NOT EXISTS %s.runs (
   budget numeric NOT NULL,
   budget_used numeric NOT NULL,
   budget_left numeric NOT NULL,
+  budget_required_full numeric NOT NULL,
+  budget_shortfall numeric NOT NULL,
   applicants int NOT NULL,
   eligible_count int NOT NULL,
   awarded_count int NOT NULL,
@@ -1182,6 +1422,8 @@ CREATE TABLE IF NOT EXISTS %s.runs (
   score_weight numeric NOT NULL,
   need_weight numeric NOT NULL,
   reserve_high numeric NOT NULL,
+  reserve_medium numeric NOT NULL,
+  reserve_low numeric NOT NULL,
   round_to numeric NOT NULL,
   max_percent numeric NOT NULL,
   min_score numeric NOT NULL,
@@ -1228,10 +1470,17 @@ CREATE TABLE IF NOT EXISTS %s.need_coverage (
   unfunded_count int NOT NULL,
   requested_total numeric NOT NULL,
   awarded_total numeric NOT NULL,
-  coverage_rate numeric NOT NULL
+  coverage_rate numeric NOT NULL,
+  requested_share numeric NOT NULL,
+  awarded_share numeric NOT NULL,
+  share_delta numeric NOT NULL
 );`, schema, schema)
 	if _, err := pool.Exec(ctx, needCoverageTable); err != nil {
 		return fmt.Errorf("create need_coverage table: %w", err)
+	}
+
+	if err := ensureNeedCoverageColumns(ctx, pool, schema); err != nil {
+		return err
 	}
 
 	coverageIndex := fmt.Sprintf("CREATE INDEX IF NOT EXISTS need_coverage_run_id_idx ON %s.need_coverage(run_id);", schema)
@@ -1256,9 +1505,25 @@ ALTER TABLE %s.runs
   ADD COLUMN IF NOT EXISTS last_funded_priority numeric NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS last_funded_score numeric NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS last_funded_need text NOT NULL DEFAULT '',
-  ADD COLUMN IF NOT EXISTS last_funded_requested numeric NOT NULL DEFAULT 0;`, schema)
+  ADD COLUMN IF NOT EXISTS last_funded_requested numeric NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS budget_required_full numeric NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS budget_shortfall numeric NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS reserve_medium numeric NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS reserve_low numeric NOT NULL DEFAULT 0;`, schema)
 	if _, err := pool.Exec(ctx, alter); err != nil {
 		return fmt.Errorf("alter runs table: %w", err)
+	}
+	return nil
+}
+
+func ensureNeedCoverageColumns(ctx context.Context, pool *pgxpool.Pool, schema string) error {
+	alter := fmt.Sprintf(`
+ALTER TABLE %s.need_coverage
+  ADD COLUMN IF NOT EXISTS requested_share numeric NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS awarded_share numeric NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS share_delta numeric NOT NULL DEFAULT 0;`, schema)
+	if _, err := pool.Exec(ctx, alter); err != nil {
+		return fmt.Errorf("alter need_coverage table: %w", err)
 	}
 	return nil
 }
@@ -1272,6 +1537,8 @@ func insertRun(ctx context.Context, pool *pgxpool.Pool, schema string, runID uui
 			"budget",
 			"budget_used",
 			"budget_left",
+			"budget_required_full",
+			"budget_shortfall",
 			"applicants",
 			"eligible_count",
 			"awarded_count",
@@ -1300,6 +1567,8 @@ func insertRun(ctx context.Context, pool *pgxpool.Pool, schema string, runID uui
 			"score_weight",
 			"need_weight",
 			"reserve_high",
+			"reserve_medium",
+			"reserve_low",
 			"round_to",
 			"max_percent",
 			"min_score",
@@ -1311,6 +1580,8 @@ func insertRun(ctx context.Context, pool *pgxpool.Pool, schema string, runID uui
 			summary.Budget,
 			summary.BudgetUsed,
 			summary.BudgetLeft,
+			summary.BudgetRequiredFull,
+			summary.BudgetShortfall,
 			summary.Applicants,
 			summary.EligibleCount,
 			summary.AwardedCount,
@@ -1339,6 +1610,8 @@ func insertRun(ctx context.Context, pool *pgxpool.Pool, schema string, runID uui
 			opts.ScoreWeight,
 			opts.NeedWeight,
 			opts.ReserveHigh,
+			opts.ReserveMedium,
+			opts.ReserveLow,
 			opts.RoundTo,
 			opts.MaxPercent,
 			opts.MinScore,
@@ -1422,6 +1695,9 @@ func insertNeedCoverage(ctx context.Context, pool *pgxpool.Pool, schema string, 
 			"requested_total",
 			"awarded_total",
 			"coverage_rate",
+			"requested_share",
+			"awarded_share",
+			"share_delta",
 		).
 		PlaceholderFormat(sq.Dollar)
 
@@ -1440,6 +1716,9 @@ func insertNeedCoverage(ctx context.Context, pool *pgxpool.Pool, schema string, 
 			agg.RequestedTotal,
 			agg.AwardedTotal,
 			agg.CoverageRate,
+			agg.RequestedShare,
+			agg.AwardedShare,
+			agg.ShareDelta,
 		)
 	}
 

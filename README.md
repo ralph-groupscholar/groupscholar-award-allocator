@@ -11,8 +11,11 @@ A Go-based CLI that ranks applicants and allocates scholarship awards against a 
 - Full vs partial funding rates with total funding gap
 - Award distribution percentiles plus last-funded cutoff details
 - Need-level coverage metrics (eligible, awarded, requested, coverage rate)
+- Budget shortfall vs full-funding requirement
+- Need equity view comparing requested share vs awarded share by need level
 - Optional JSON export for dashboards or downstream analysis (includes ineligible detail)
 - Optional CSV exports for awarded, unfunded, and ineligible cohorts
+- Optional Markdown report export for stakeholder-ready summaries
 
 ## Usage
 
@@ -47,6 +50,15 @@ To export CSVs:
   -awards-csv awarded.csv \
   -unfunded-csv unfunded.csv \
   -ineligible-csv ineligible.csv
+```
+
+To export a Markdown report:
+
+```bash
+/opt/homebrew/bin/go run . \
+  -input sample-applicants.csv \
+  -budget 20000 \
+  -report award-report.md
 ```
 
 ## Database Logging (Optional)
