@@ -11,6 +11,7 @@ A Go-based CLI that ranks applicants and allocates scholarship awards against a 
 - Full vs partial funding rates with total funding gap
 - Award distribution percentiles plus last-funded cutoff details
 - Need-level coverage metrics (eligible, awarded, requested, coverage rate)
+- Optional budget reserve shares per need level
 - Budget shortfall vs full-funding requirement
 - Need equity view comparing requested share vs awarded share by need level
 - Optional JSON export for dashboards or downstream analysis (includes ineligible detail)
@@ -27,6 +28,8 @@ A Go-based CLI that ranks applicants and allocates scholarship awards against a 
   -max 5000 \
   -score-weight 0.7 \
   -need-weight 0.3 \
+  -reserve-high 0.4 \
+  -reserve-medium 0.2 \
   -min-score 70 \
   -top 5 \
   -unfunded 5
@@ -97,3 +100,4 @@ Optional headers:
 - If `requested_amount` is below `-min`, the requested amount is honored.
 - Applicants with invalid `need_level` or non-positive `requested_amount` are skipped.
 - Use `-min-score` to exclude applicants below a minimum score from eligibility.
+- Use `-reserve-high`, `-reserve-medium`, and `-reserve-low` to floor budget shares per need level (sum must be <= 1).

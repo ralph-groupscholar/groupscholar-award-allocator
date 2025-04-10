@@ -43,3 +43,8 @@
 ## Iteration 9
 - Added Markdown report export for allocation summaries with awards, unfunded, and need coverage tables.
 - Added Go test coverage for award calculation, reserve allocation, and summary metrics.
+
+## Iteration 9
+- Added per-need budget reserve shares for high/medium/low applicants with validation and database logging.
+- Added allocation tests covering reserve share behavior.
+- Updated README usage notes to document the new reserve options.
