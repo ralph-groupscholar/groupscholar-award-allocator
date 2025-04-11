@@ -70,6 +70,7 @@ type allocationSummary struct {
 	Awards                  []awardRecord              `json:"awards"`
 	Unfunded                []awardRecord              `json:"unfunded"`
 	Ineligible              []ineligibleRecord         `json:"ineligible"`
+	ScenarioResults         []scenarioResult           `json:"scenario_results,omitempty"`
 }
 
 type needAgg struct {
@@ -113,6 +114,23 @@ type ineligibleRecord struct {
 	Reason      string  `json:"reason"`
 }
 
+type scenarioResult struct {
+	Budget                float64 `json:"budget"`
+	BudgetUsed            float64 `json:"budget_used"`
+	BudgetLeft            float64 `json:"budget_left"`
+	BudgetRequiredFull    float64 `json:"budget_required_full"`
+	AwardedCount          int     `json:"awarded_count"`
+	EligibleCount         int     `json:"eligible_count"`
+	EligibleUnfundedCount int     `json:"eligible_unfunded_count"`
+	FullyFundedCount      int     `json:"fully_funded_count"`
+	PartiallyFundedCount  int     `json:"partially_funded_count"`
+	CoverageRate          float64 `json:"coverage_rate"`
+	FullFundingRate       float64 `json:"full_funding_rate"`
+	FundingGapTotal       float64 `json:"funding_gap_total"`
+	AverageAward          float64 `json:"average_award"`
+	AwardToRequestAvg     float64 `json:"award_to_request_avg"`
+}
+
 func main() {
 	inputPath := flag.String("input", "", "Path to applicant CSV file")
 	budget := flag.Float64("budget", 0, "Total award budget")
@@ -131,6 +149,7 @@ func main() {
 	unfundedCSV := flag.String("unfunded-csv", "", "Optional path to write unfunded eligible applicants CSV")
 	ineligibleCSV := flag.String("ineligible-csv", "", "Optional path to write ineligible applicants CSV")
 	reportPath := flag.String("report", "", "Optional path to write Markdown allocation report")
+	scenarioBudgets := flag.String("scenario-budgets", "", "Comma-separated budgets for scenario analysis")
 	topN := flag.Int("top", 10, "Number of awarded applicants to display")
 	showAll := flag.Bool("all", false, "Show all awarded applicants")
 	unfundedTop := flag.Int("unfunded", 10, "Number of unfunded eligible applicants to display")
@@ -172,6 +191,10 @@ func main() {
 	if weightTotal == 0 {
 		exitWith("score-weight and need-weight cannot both be zero")
 	}
+	scenarioList, err := parseBudgetList(*scenarioBudgets)
+	if err != nil {
+		exitWith(err.Error())
+	}
 
 	applicants, warnings, err := loadApplicants(*inputPath)
 	if err != nil {
@@ -193,7 +216,11 @@ func main() {
 	}
 
 	summary := summarize(applicants, *budget, awarded)
+	if len(scenarioList) > 0 {
+		summary.ScenarioResults = buildScenarioResults(applicants, scenarioList, *minAward, *maxAward, *reserveHigh, *reserveMedium, *reserveLow, *roundTo, *maxPercent)
+	}
 	printSummary(summary)
+	printScenarioResults(summary.ScenarioResults)
 	printAwards(awarded, *topN, *showAll)
 	printUnfunded(summary.Unfunded, *unfundedTop, *showAllUnfunded)
 
@@ -738,6 +765,113 @@ func summarize(applicants []*applicant, budget float64, awarded []*applicant) al
 	}
 }
 
+func parseBudgetList(raw string) ([]float64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	parts := strings.Split(raw, ",")
+	var budgets []float64
+	for _, part := range parts {
+		value := strings.TrimSpace(part)
+		if value == "" {
+			continue
+		}
+		parsed, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid scenario budget: %s", value)
+		}
+		if parsed <= 0 {
+			return nil, fmt.Errorf("scenario budgets must be > 0")
+		}
+		budgets = append(budgets, parsed)
+	}
+	return budgets, nil
+}
+
+func buildScenarioResults(applicants []*applicant, budgets []float64, minAward, maxAward, reserveHigh, reserveMedium, reserveLow, roundTo, maxPercent float64) []scenarioResult {
+	results := make([]scenarioResult, 0, len(budgets))
+	for _, budget := range budgets {
+		clone := cloneApplicants(applicants)
+		awarded := allocateBudget(clone, budget, minAward, maxAward, reserveHigh, reserveMedium, reserveLow, roundTo, maxPercent)
+		results = append(results, summarizeScenario(clone, awarded, budget))
+	}
+	return results
+}
+
+func cloneApplicants(applicants []*applicant) []*applicant {
+	clone := make([]*applicant, 0, len(applicants))
+	for _, item := range applicants {
+		copyItem := *item
+		copyItem.Awarded = 0
+		clone = append(clone, &copyItem)
+	}
+	return clone
+}
+
+func summarizeScenario(applicants []*applicant, awarded []*applicant, budget float64) scenarioResult {
+	var eligibleCount int
+	var unfundedCount int
+	var fullyFundedCount int
+	var partiallyFundedCount int
+	var eligibleRequestedTotal float64
+	var awardRates []float64
+	for _, item := range applicants {
+		if !item.Eligible {
+			continue
+		}
+		eligibleCount++
+		eligibleRequestedTotal += item.Requested
+		if item.Awarded == 0 {
+			unfundedCount++
+			continue
+		}
+		if item.Awarded >= item.Requested {
+			fullyFundedCount++
+		} else {
+			partiallyFundedCount++
+		}
+		if item.Requested > 0 {
+			awardRates = append(awardRates, item.Awarded/item.Requested)
+		}
+	}
+
+	budgetUsed := totalAwarded(awarded)
+	averageAward := 0.0
+	if len(awarded) > 0 {
+		averageAward = budgetUsed / float64(len(awarded))
+	}
+	coverageRate := 0.0
+	if eligibleRequestedTotal > 0 {
+		coverageRate = budgetUsed / eligibleRequestedTotal
+	}
+	fundingGapTotal := eligibleRequestedTotal - budgetUsed
+	if fundingGapTotal < 0 {
+		fundingGapTotal = 0
+	}
+	fullFundingRate := 0.0
+	if eligibleCount > 0 {
+		fullFundingRate = float64(fullyFundedCount) / float64(eligibleCount)
+	}
+
+	return scenarioResult{
+		Budget:                budget,
+		BudgetUsed:            budgetUsed,
+		BudgetLeft:            budget - budgetUsed,
+		BudgetRequiredFull:    eligibleRequestedTotal,
+		AwardedCount:          len(awarded),
+		EligibleCount:         eligibleCount,
+		EligibleUnfundedCount: unfundedCount,
+		FullyFundedCount:      fullyFundedCount,
+		PartiallyFundedCount:  partiallyFundedCount,
+		CoverageRate:          coverageRate,
+		FullFundingRate:       fullFundingRate,
+		FundingGapTotal:       fundingGapTotal,
+		AverageAward:          averageAward,
+		AwardToRequestAvg:     averageFloat(awardRates),
+	}
+}
+
 func buildAwardRecords(awarded []*applicant) []awardRecord {
 	records := make([]awardRecord, 0, len(awarded))
 	for _, item := range awarded {
@@ -831,6 +965,27 @@ func printSummary(summary allocationSummary) {
 	printNeedCoverage(summary.NeedCoverage)
 	printNeedEquity(summary.NeedCoverage)
 	printUnfundedByNeed(summary.UnfundedByNeed)
+}
+
+func printScenarioResults(results []scenarioResult) {
+	if len(results) == 0 {
+		return
+	}
+	fmt.Println("\nScenario Analysis")
+	fmt.Println(strings.Repeat("-", 16))
+	fmt.Printf("%-12s | %-7s | %-8s | %-9s | %-11s | %-11s | %-11s\n",
+		"Budget", "Awarded", "Unfunded", "Coverage", "Full Funded", "Budget Used", "Budget Left")
+	for _, result := range results {
+		fmt.Printf("%-12s | %-7d | %-8d | %-9s | %-11s | %-11s | %-11s\n",
+			formatCurrency(result.Budget),
+			result.AwardedCount,
+			result.EligibleUnfundedCount,
+			formatPercent(result.CoverageRate),
+			formatPercent(result.FullFundingRate),
+			formatCurrency(result.BudgetUsed),
+			formatCurrency(result.BudgetLeft),
+		)
+	}
 }
 
 func printNeedCoverage(coverage map[string]needCoverageAgg) {
@@ -1184,6 +1339,23 @@ func writeReport(path string, summary allocationSummary, topN int, showAll bool,
 			formatCurrency(agg.AwardedTotal),
 			formatPercent(agg.CoverageRate),
 		)
+	}
+
+	if len(summary.ScenarioResults) > 0 {
+		fmt.Fprintln(file, "\n## Scenario Analysis")
+		fmt.Fprintln(file, "| Budget | Awarded | Unfunded | Coverage | Full Funding | Budget Used | Budget Left |")
+		fmt.Fprintln(file, "| --- | --- | --- | --- | --- | --- | --- |")
+		for _, result := range summary.ScenarioResults {
+			fmt.Fprintf(file, "| %s | %d | %d | %s | %s | %s | %s |\n",
+				formatCurrency(result.Budget),
+				result.AwardedCount,
+				result.EligibleUnfundedCount,
+				formatPercent(result.CoverageRate),
+				formatPercent(result.FullFundingRate),
+				formatCurrency(result.BudgetUsed),
+				formatCurrency(result.BudgetLeft),
+			)
+		}
 	}
 
 	if len(summary.IneligibleReasonSummary) > 0 {

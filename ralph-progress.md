@@ -48,3 +48,8 @@
 - Added per-need budget reserve shares for high/medium/low applicants with validation and database logging.
 - Added allocation tests covering reserve share behavior.
 - Updated README usage notes to document the new reserve options.
+
+## Iteration 10
+- Added scenario budget analysis with tabular console output, JSON inclusion, and Markdown report tables.
+- Introduced scenario parsing and cloning helpers plus tests covering scenario metrics and parsing.
+- Updated README to document scenario budget comparisons.

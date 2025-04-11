@@ -64,6 +64,15 @@ To export a Markdown report:
   -report award-report.md
 ```
 
+To compare scenarios across multiple budgets:
+
+```bash
+/opt/homebrew/bin/go run . \
+  -input sample-applicants.csv \
+  -budget 20000 \
+  -scenario-budgets 15000,20000,25000
+```
+
 ## Database Logging (Optional)
 
 Enable run logging to Postgres for longitudinal analysis.
