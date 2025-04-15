@@ -50,6 +50,11 @@
 - Updated README usage notes to document the new reserve options.
 
 ## Iteration 10
+- Added need-specific min/max award caps with CLI flags and validation.
+- Updated allocation logic, scenario modeling, and database logging to persist per-need caps.
+- Added test coverage for need-specific caps and refreshed README usage notes.
+
+## Iteration 10
 - Added scenario budget analysis with tabular console output, JSON inclusion, and Markdown report tables.
 - Introduced scenario parsing and cloning helpers plus tests covering scenario metrics and parsing.
 - Updated README to document scenario budget comparisons.

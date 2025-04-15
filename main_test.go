@@ -15,6 +15,17 @@ func buildApplicant(id, need string, score, requested float64) *applicant {
 	}
 }
 
+func defaultCaps() needAwardCaps {
+	return needAwardCaps{
+		MinHigh:   -1,
+		MaxHigh:   -1,
+		MinMedium: -1,
+		MaxMedium: -1,
+		MinLow:    -1,
+		MaxLow:    -1,
+	}
+}
+
 func prepApplicants(applicants []*applicant, scoreWeight, needWeight float64) {
 	applyMinScore(applicants, 0)
 	normalizeScores(applicants)
@@ -29,7 +40,7 @@ func TestReserveLowGuaranteesLowNeedFunding(t *testing.T) {
 	}
 	prepApplicants(applicants, 0.7, 0.3)
 
-	awarded := allocateBudget(applicants, 1000, 1000, 1000, 0, 0, 1, 0, 1)
+	awarded := allocateBudget(applicants, 1000, 1000, 1000, defaultCaps(), 0, 0, 1, 0, 1)
 	if len(awarded) != 1 {
 		t.Fatalf("expected 1 awarded applicant, got %d", len(awarded))
 	}
@@ -50,7 +61,7 @@ func TestReserveMixAllocatesAcrossNeedLevels(t *testing.T) {
 	}
 	prepApplicants(applicants, 0.7, 0.3)
 
-	awarded := allocateBudget(applicants, 4000, 1000, 1000, 0.5, 0.25, 0, 0, 1)
+	awarded := allocateBudget(applicants, 4000, 1000, 1000, defaultCaps(), 0.5, 0.25, 0, 0, 1)
 	if len(awarded) != 4 {
 		t.Fatalf("expected 4 awarded applicants, got %d", len(awarded))
 	}
@@ -58,6 +69,34 @@ func TestReserveMixAllocatesAcrossNeedLevels(t *testing.T) {
 		if item.Awarded != 1000 {
 			t.Fatalf("expected %s to be fully funded, got %.2f", item.ID, item.Awarded)
 		}
+	}
+}
+
+func TestNeedSpecificCapsOverrideGlobal(t *testing.T) {
+	applicants := []*applicant{
+		buildApplicant("high-1", "high", 95, 1800),
+		buildApplicant("low-1", "low", 70, 1200),
+	}
+	prepApplicants(applicants, 0.7, 0.3)
+
+	caps := needAwardCaps{
+		MinHigh:   1500,
+		MaxHigh:   -1,
+		MinMedium: -1,
+		MaxMedium: -1,
+		MinLow:    -1,
+		MaxLow:    800,
+	}
+
+	awarded := allocateBudget(applicants, 4000, 500, 2000, caps, 0, 0, 0, 0, 1)
+	if len(awarded) != 2 {
+		t.Fatalf("expected 2 awarded applicants, got %d", len(awarded))
+	}
+	if applicants[0].Awarded < 1500 {
+		t.Fatalf("expected high-need award to respect min cap, got %.2f", applicants[0].Awarded)
+	}
+	if applicants[1].Awarded > 800 {
+		t.Fatalf("expected low-need award to respect max cap, got %.2f", applicants[1].Awarded)
 	}
 }
 
@@ -86,7 +125,7 @@ func TestScenarioResultsBudgetImpact(t *testing.T) {
 	}
 	prepApplicants(applicants, 0.7, 0.3)
 
-	results := buildScenarioResults(applicants, []float64{1000, 2000}, 1000, 1000, 0, 0, 0, 0, 1)
+	results := buildScenarioResults(applicants, []float64{1000, 2000}, 1000, 1000, defaultCaps(), 0, 0, 0, 0, 1)
 	if len(results) != 2 {
 		t.Fatalf("expected 2 scenario results, got %d", len(results))
 	}

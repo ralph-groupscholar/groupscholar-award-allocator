@@ -5,6 +5,7 @@ A Go-based CLI that ranks applicants and allocates scholarship awards against a 
 ## Features
 - Weighted prioritization using applicant score and need level
 - Budget-aware allocation with min/max award caps
+- Need-specific min/max award caps by need level
 - Optional minimum score eligibility threshold
 - Summary metrics by need level plus a ranked award list
 - Coverage and unfunded demand signals, including unfunded lists
@@ -26,6 +27,8 @@ A Go-based CLI that ranks applicants and allocates scholarship awards against a 
   -budget 20000 \
   -min 500 \
   -max 5000 \
+  -min-high 1000 \
+  -max-low 1500 \
   -score-weight 0.7 \
   -need-weight 0.3 \
   -reserve-high 0.4 \
@@ -110,3 +113,4 @@ Optional headers:
 - Applicants with invalid `need_level` or non-positive `requested_amount` are skipped.
 - Use `-min-score` to exclude applicants below a minimum score from eligibility.
 - Use `-reserve-high`, `-reserve-medium`, and `-reserve-low` to floor budget shares per need level (sum must be <= 1).
+- Use `-min-high`, `-max-high`, `-min-medium`, `-max-medium`, `-min-low`, and `-max-low` to override global award caps for each need level (use `-1` to inherit the global cap).

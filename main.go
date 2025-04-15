@@ -114,6 +114,15 @@ type ineligibleRecord struct {
 	Reason      string  `json:"reason"`
 }
 
+type needAwardCaps struct {
+	MinHigh   float64
+	MaxHigh   float64
+	MinMedium float64
+	MaxMedium float64
+	MinLow    float64
+	MaxLow    float64
+}
+
 type scenarioResult struct {
 	Budget                float64 `json:"budget"`
 	BudgetUsed            float64 `json:"budget_used"`
@@ -136,6 +145,12 @@ func main() {
 	budget := flag.Float64("budget", 0, "Total award budget")
 	minAward := flag.Float64("min", 500, "Minimum award amount")
 	maxAward := flag.Float64("max", 5000, "Maximum award amount")
+	minHigh := flag.Float64("min-high", -1, "Minimum award for high-need applicants (-1 uses global min)")
+	maxHigh := flag.Float64("max-high", -1, "Maximum award for high-need applicants (-1 uses global max)")
+	minMedium := flag.Float64("min-medium", -1, "Minimum award for medium-need applicants (-1 uses global min)")
+	maxMedium := flag.Float64("max-medium", -1, "Maximum award for medium-need applicants (-1 uses global max)")
+	minLow := flag.Float64("min-low", -1, "Minimum award for low-need applicants (-1 uses global min)")
+	maxLow := flag.Float64("max-low", -1, "Maximum award for low-need applicants (-1 uses global max)")
 	scoreWeight := flag.Float64("score-weight", 0.7, "Weight for applicant score (0-1)")
 	needWeight := flag.Float64("need-weight", 0.3, "Weight for need level (0-1)")
 	reserveHigh := flag.Float64("reserve-high", 0, "Share of budget reserved for high-need applicants (0-1)")
@@ -162,6 +177,16 @@ func main() {
 	}
 	if *minAward < 0 || *maxAward <= 0 || *maxAward < *minAward {
 		exitWith("invalid min/max award values")
+	}
+	if err := validateNeedCaps(*minAward, *maxAward, needAwardCaps{
+		MinHigh:   *minHigh,
+		MaxHigh:   *maxHigh,
+		MinMedium: *minMedium,
+		MaxMedium: *maxMedium,
+		MinLow:    *minLow,
+		MaxLow:    *maxLow,
+	}); err != nil {
+		exitWith(err.Error())
 	}
 	if *scoreWeight < 0 || *needWeight < 0 {
 		exitWith("weights must be non-negative")
@@ -205,8 +230,16 @@ func main() {
 	normalizeScores(applicants)
 	assignPriority(applicants, *scoreWeight, *needWeight)
 	sortApplicants(applicants)
+	caps := needAwardCaps{
+		MinHigh:   *minHigh,
+		MaxHigh:   *maxHigh,
+		MinMedium: *minMedium,
+		MaxMedium: *maxMedium,
+		MinLow:    *minLow,
+		MaxLow:    *maxLow,
+	}
 
-	awarded := allocateBudget(applicants, *budget, *minAward, *maxAward, *reserveHigh, *reserveMedium, *reserveLow, *roundTo, *maxPercent)
+	awarded := allocateBudget(applicants, *budget, *minAward, *maxAward, caps, *reserveHigh, *reserveMedium, *reserveLow, *roundTo, *maxPercent)
 	if len(warnings) > 0 {
 		fmt.Println("Warnings:")
 		for _, warning := range warnings {
@@ -217,7 +250,7 @@ func main() {
 
 	summary := summarize(applicants, *budget, awarded)
 	if len(scenarioList) > 0 {
-		summary.ScenarioResults = buildScenarioResults(applicants, scenarioList, *minAward, *maxAward, *reserveHigh, *reserveMedium, *reserveLow, *roundTo, *maxPercent)
+		summary.ScenarioResults = buildScenarioResults(applicants, scenarioList, *minAward, *maxAward, caps, *reserveHigh, *reserveMedium, *reserveLow, *roundTo, *maxPercent)
 	}
 	printSummary(summary)
 	printScenarioResults(summary.ScenarioResults)
@@ -271,6 +304,12 @@ func main() {
 			opts := dbRunOptions{
 				MinAward:      *minAward,
 				MaxAward:      *maxAward,
+				MinHigh:       *minHigh,
+				MaxHigh:       *maxHigh,
+				MinMedium:     *minMedium,
+				MaxMedium:     *maxMedium,
+				MinLow:        *minLow,
+				MaxLow:        *maxLow,
 				ScoreWeight:   *scoreWeight,
 				NeedWeight:    *needWeight,
 				ReserveHigh:   *reserveHigh,
@@ -476,7 +515,7 @@ func sortApplicants(applicants []*applicant) {
 	})
 }
 
-func allocateBudget(applicants []*applicant, budget, minAward, maxAward, reserveHigh, reserveMedium, reserveLow, roundTo, maxPercent float64) []*applicant {
+func allocateBudget(applicants []*applicant, budget, minAward, maxAward float64, caps needAwardCaps, reserveHigh, reserveMedium, reserveLow, roundTo, maxPercent float64) []*applicant {
 	remaining := budget
 	var awarded []*applicant
 
@@ -497,7 +536,7 @@ func allocateBudget(applicants []*applicant, budget, minAward, maxAward, reserve
 		if reserved <= 0 {
 			continue
 		}
-		reservedAwards := allocatePass(applicants, reserved, minAward, maxAward, roundTo, maxPercent, func(item *applicant) bool {
+		reservedAwards := allocatePass(applicants, reserved, minAward, maxAward, caps, roundTo, maxPercent, func(item *applicant) bool {
 			return item.NeedLevel == reserve.level && item.Awarded == 0
 		})
 		awarded = append(awarded, reservedAwards...)
@@ -508,21 +547,22 @@ func allocateBudget(applicants []*applicant, budget, minAward, maxAward, reserve
 		remaining = 0
 	}
 
-	remainingAwards := allocatePass(applicants, remaining, minAward, maxAward, roundTo, maxPercent, func(item *applicant) bool {
+	remainingAwards := allocatePass(applicants, remaining, minAward, maxAward, caps, roundTo, maxPercent, func(item *applicant) bool {
 		return item.Awarded == 0
 	})
 	awarded = append(awarded, remainingAwards...)
 	return awarded
 }
 
-func allocatePass(applicants []*applicant, budget, minAward, maxAward, roundTo, maxPercent float64, allow func(*applicant) bool) []*applicant {
+func allocatePass(applicants []*applicant, budget, minAward, maxAward float64, caps needAwardCaps, roundTo, maxPercent float64, allow func(*applicant) bool) []*applicant {
 	remaining := budget
 	var awarded []*applicant
 	for _, item := range applicants {
 		if !item.Eligible || !allow(item) {
 			continue
 		}
-		award := computeAward(item.Requested, minAward, maxAward, roundTo, maxPercent)
+		itemMin, itemMax := awardCapsForNeed(item.NeedLevel, minAward, maxAward, caps)
+		award := computeAward(item.Requested, itemMin, itemMax, roundTo, maxPercent)
 		if award <= 0 {
 			continue
 		}
@@ -563,6 +603,55 @@ func computeAward(requested, minAward, maxAward, roundTo, maxPercent float64) fl
 		award = clamp(award, minAward, capAmount)
 	}
 	return award
+}
+
+func validateNeedCaps(globalMin, globalMax float64, caps needAwardCaps) error {
+	type capSpec struct {
+		label string
+		min   float64
+		max   float64
+	}
+	levels := []capSpec{
+		{label: "high", min: caps.MinHigh, max: caps.MaxHigh},
+		{label: "medium", min: caps.MinMedium, max: caps.MaxMedium},
+		{label: "low", min: caps.MinLow, max: caps.MaxLow},
+	}
+	for _, level := range levels {
+		minCap, maxCap := resolveNeedCaps(level.min, level.max, globalMin, globalMax)
+		if minCap < 0 {
+			return fmt.Errorf("min-%s must be >= 0", level.label)
+		}
+		if maxCap <= 0 {
+			return fmt.Errorf("max-%s must be > 0", level.label)
+		}
+		if maxCap < minCap {
+			return fmt.Errorf("min-%s cannot exceed max-%s", level.label, level.label)
+		}
+	}
+	return nil
+}
+
+func awardCapsForNeed(level string, globalMin, globalMax float64, caps needAwardCaps) (float64, float64) {
+	switch strings.ToLower(level) {
+	case "high":
+		return resolveNeedCaps(caps.MinHigh, caps.MaxHigh, globalMin, globalMax)
+	case "medium":
+		return resolveNeedCaps(caps.MinMedium, caps.MaxMedium, globalMin, globalMax)
+	case "low":
+		return resolveNeedCaps(caps.MinLow, caps.MaxLow, globalMin, globalMax)
+	default:
+		return globalMin, globalMax
+	}
+}
+
+func resolveNeedCaps(minCap, maxCap, globalMin, globalMax float64) (float64, float64) {
+	if minCap < 0 {
+		minCap = globalMin
+	}
+	if maxCap < 0 {
+		maxCap = globalMax
+	}
+	return minCap, maxCap
 }
 
 func clamp(value, min, max float64) float64 {
@@ -789,11 +878,11 @@ func parseBudgetList(raw string) ([]float64, error) {
 	return budgets, nil
 }
 
-func buildScenarioResults(applicants []*applicant, budgets []float64, minAward, maxAward, reserveHigh, reserveMedium, reserveLow, roundTo, maxPercent float64) []scenarioResult {
+func buildScenarioResults(applicants []*applicant, budgets []float64, minAward, maxAward float64, caps needAwardCaps, reserveHigh, reserveMedium, reserveLow, roundTo, maxPercent float64) []scenarioResult {
 	results := make([]scenarioResult, 0, len(budgets))
 	for _, budget := range budgets {
 		clone := cloneApplicants(applicants)
-		awarded := allocateBudget(clone, budget, minAward, maxAward, reserveHigh, reserveMedium, reserveLow, roundTo, maxPercent)
+		awarded := allocateBudget(clone, budget, minAward, maxAward, caps, reserveHigh, reserveMedium, reserveLow, roundTo, maxPercent)
 		results = append(results, summarizeScenario(clone, awarded, budget))
 	}
 	return results
@@ -1482,6 +1571,12 @@ type dbConfig struct {
 type dbRunOptions struct {
 	MinAward      float64
 	MaxAward      float64
+	MinHigh       float64
+	MaxHigh       float64
+	MinMedium     float64
+	MaxMedium     float64
+	MinLow        float64
+	MaxLow        float64
 	ScoreWeight   float64
 	NeedWeight    float64
 	ReserveHigh   float64
@@ -1591,6 +1686,12 @@ CREATE TABLE IF NOT EXISTS %s.runs (
   last_funded_requested numeric NOT NULL,
   min_award_option numeric NOT NULL,
   max_award_option numeric NOT NULL,
+  min_high numeric NOT NULL,
+  max_high numeric NOT NULL,
+  min_medium numeric NOT NULL,
+  max_medium numeric NOT NULL,
+  min_low numeric NOT NULL,
+  max_low numeric NOT NULL,
   score_weight numeric NOT NULL,
   need_weight numeric NOT NULL,
   reserve_high numeric NOT NULL,
@@ -1680,6 +1781,12 @@ ALTER TABLE %s.runs
   ADD COLUMN IF NOT EXISTS last_funded_requested numeric NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS budget_required_full numeric NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS budget_shortfall numeric NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS min_high numeric NOT NULL DEFAULT -1,
+  ADD COLUMN IF NOT EXISTS max_high numeric NOT NULL DEFAULT -1,
+  ADD COLUMN IF NOT EXISTS min_medium numeric NOT NULL DEFAULT -1,
+  ADD COLUMN IF NOT EXISTS max_medium numeric NOT NULL DEFAULT -1,
+  ADD COLUMN IF NOT EXISTS min_low numeric NOT NULL DEFAULT -1,
+  ADD COLUMN IF NOT EXISTS max_low numeric NOT NULL DEFAULT -1,
   ADD COLUMN IF NOT EXISTS reserve_medium numeric NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS reserve_low numeric NOT NULL DEFAULT 0;`, schema)
 	if _, err := pool.Exec(ctx, alter); err != nil {
@@ -1736,6 +1843,12 @@ func insertRun(ctx context.Context, pool *pgxpool.Pool, schema string, runID uui
 			"last_funded_requested",
 			"min_award_option",
 			"max_award_option",
+			"min_high",
+			"max_high",
+			"min_medium",
+			"max_medium",
+			"min_low",
+			"max_low",
 			"score_weight",
 			"need_weight",
 			"reserve_high",
@@ -1779,6 +1892,12 @@ func insertRun(ctx context.Context, pool *pgxpool.Pool, schema string, runID uui
 			summary.LastFundedRequested,
 			opts.MinAward,
 			opts.MaxAward,
+			opts.MinHigh,
+			opts.MaxHigh,
+			opts.MinMedium,
+			opts.MaxMedium,
+			opts.MinLow,
+			opts.MaxLow,
 			opts.ScoreWeight,
 			opts.NeedWeight,
 			opts.ReserveHigh,
